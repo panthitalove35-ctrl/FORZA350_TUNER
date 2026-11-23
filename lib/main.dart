@@ -1,17 +1,20 @@
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const ForzaRemapStudio());
 }
 
 // ============================================================
 // FORZA REMAP STUDIO
-// Local map editor - no real ECU communication implemented
+// Local map editor - ECU communication not implemented
 // ============================================================
 
 const Color bg = Color(0xFF0B0F14);
@@ -30,6 +33,7 @@ final List<int> tpsAxis =
     List<int>.generate(51, (i) => i * 2);
 
 enum MapType { fuel, ignition, afr }
+enum GraphMode { twoD, threeD }
 
 class ForzaRemapStudio extends StatelessWidget {
   const ForzaRemapStudio({super.key});
@@ -64,6 +68,7 @@ class StudioHome extends StatefulWidget {
 class _StudioHomeState extends State<StudioHome> {
   int page = 0;
   MapType activeMap = MapType.fuel;
+  GraphMode graphMode = GraphMode.twoD;
 
   late List<List<double>> fuelMap;
   late List<List<double>> ignitionMap;
@@ -71,6 +76,12 @@ class _StudioHomeState extends State<StudioHome> {
 
   bool saved = true;
   bool rangeSelectMode = false;
+  bool autoScrollEnabled = true;
+
+  double zoom = 1.0;
+  double graphRotation = 0;
+
+  String orientationMode = 'Auto Rotate';
 
   int? selectionStartRow;
   int? selectionStartCol;
@@ -82,20 +93,29 @@ class _StudioHomeState extends State<StudioHome> {
   final ScrollController mapVerticalController =
       ScrollController();
 
+  final GlobalKey mapViewportKey = GlobalKey();
+  final GlobalKey mapContentKey = GlobalKey();
+
+  Timer? autoScrollTimer;
+  Offset? lastPointerGlobal;
+  Offset? lastPointerLocal;
+
   final List<List<List<List<double>>>> undoStack = [];
   final List<List<List<List<double>>>> redoStack = [];
 
   @override
   void initState() {
     super.initState();
-    fuelMap = _createMap(100.0);
-    ignitionMap = _createMap(0.0);
+    fuelMap = _createMap(100);
+    ignitionMap = _createMap(0);
     afrMap = _createMap(14.7);
     _loadMaps();
+    _loadSettings();
   }
 
   @override
   void dispose() {
+    autoScrollTimer?.cancel();
     mapHorizontalController.dispose();
     mapVerticalController.dispose();
     super.dispose();
@@ -109,16 +129,14 @@ class _StudioHomeState extends State<StudioHome> {
   }
 
   List<List<double>> _copyMap(List<List<double>> source) {
-    return source.map((row) => List<double>.from(row)).toList();
+    return source.map((r) => List<double>.from(r)).toList();
   }
 
-  List<List<List<double>>> _snapshot() {
-    return [
-      _copyMap(fuelMap),
-      _copyMap(ignitionMap),
-      _copyMap(afrMap),
-    ];
-  }
+  List<List<List<double>>> _snapshot() => [
+        _copyMap(fuelMap),
+        _copyMap(ignitionMap),
+        _copyMap(afrMap),
+      ];
 
   void _restoreSnapshot(List<List<List<double>>> snapshot) {
     fuelMap = _copyMap(snapshot[0]);
@@ -183,15 +201,12 @@ class _StudioHomeState extends State<StudioHome> {
 
   void _history() {
     undoStack.add(_snapshot());
-    if (undoStack.length > 30) {
-      undoStack.removeAt(0);
-    }
+    if (undoStack.length > 30) undoStack.removeAt(0);
     redoStack.clear();
   }
 
   void _undo() {
     if (undoStack.isEmpty) return;
-
     setState(() {
       redoStack.add(_snapshot());
       _restoreSnapshot(undoStack.removeLast());
@@ -201,7 +216,6 @@ class _StudioHomeState extends State<StudioHome> {
 
   void _redo() {
     if (redoStack.isEmpty) return;
-
     setState(() {
       undoStack.add(_snapshot());
       _restoreSnapshot(redoStack.removeLast());
@@ -211,7 +225,6 @@ class _StudioHomeState extends State<StudioHome> {
 
   Future<void> _saveMaps() async {
     final prefs = await SharedPreferences.getInstance();
-
     await prefs.setString('fuel_map_v2', jsonEncode(fuelMap));
     await prefs.setString(
         'ignition_map_v2', jsonEncode(ignitionMap));
@@ -219,7 +232,6 @@ class _StudioHomeState extends State<StudioHome> {
 
     if (!mounted) return;
     setState(() => saved = true);
-
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('บันทึกแผนที่เรียบร้อย')),
     );
@@ -236,18 +248,15 @@ class _StudioHomeState extends State<StudioHome> {
         final decoded = jsonDecode(raw) as List;
         if (decoded.length != 35) return _createMap(fallback);
 
-        final result = decoded.map<List<double>>((row) {
+        return decoded.map<List<double>>((row) {
           final values = (row as List)
               .map((v) => (v as num).toDouble())
               .toList();
-
           if (values.length != 51) {
             throw const FormatException('Invalid map size');
           }
           return values;
         }).toList();
-
-        return result;
       } catch (_) {
         return _createMap(fallback);
       }
@@ -258,12 +267,67 @@ class _StudioHomeState extends State<StudioHome> {
       fuelMap = readMap('fuel_map_v2', 100);
       ignitionMap = readMap('ignition_map_v2', 0);
       afrMap = readMap('afr_map_v1', 14.7);
+      saved = true;
     });
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
+  // SETTINGS
+  // ==========================================================
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final mode = prefs.getString('orientation_mode') ?? 'Auto Rotate';
+    final savedZoom = prefs.getDouble('map_zoom') ?? 1.0;
+
+    if (!mounted) return;
+    setState(() {
+      orientationMode = mode;
+      zoom = savedZoom.clamp(0.65, 1.5).toDouble();
+    });
+
+    await _applyOrientation(mode);
+  }
+
+  Future<void> _saveOrientation(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('orientation_mode', mode);
+    if (!mounted) return;
+
+    setState(() => orientationMode = mode);
+    await _applyOrientation(mode);
+  }
+
+  Future<void> _applyOrientation(String mode) async {
+    if (mode == 'Portrait') {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+      ]);
+    } else if (mode == 'Landscape') {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+    } else {
+      await SystemChrome.setPreferredOrientations([]);
+    }
+  }
+
+  Future<void> _saveZoom() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('map_zoom', zoom);
+  }
+
+  void _changeZoom(double amount) {
+    setState(() {
+      zoom = (zoom + amount).clamp(0.65, 1.5).toDouble();
+    });
+    _saveZoom();
+  }
+
+  // ==========================================================
   // CELL EDIT
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Future<void> _editCell(int row, int col) async {
     final data = _map(activeMap);
@@ -318,18 +382,19 @@ class _StudioHomeState extends State<StudioHome> {
     );
 
     if (result == null) return;
-
     _history();
+
     setState(() {
-      data[row][col] =
-          result.clamp(_minimum(activeMap), _maximum(activeMap));
+      data[row][col] = result
+          .clamp(_minimum(activeMap), _maximum(activeMap))
+          .toDouble();
       saved = false;
     });
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // RANGE SELECTION
-  // ----------------------------------------------------------
+  // ==========================================================
 
   int get selectedCellCount {
     if (selectionStartRow == null ||
@@ -343,33 +408,23 @@ class _StudioHomeState extends State<StudioHome> {
         (selectionEndRow! - selectionStartRow!).abs() + 1;
     final cols =
         (selectionEndCol! - selectionStartCol!).abs() + 1;
-
     return rows * cols;
   }
 
   int get minSelectedRow =>
-      [selectionStartRow!, selectionEndRow!].reduce(
-        (a, b) => a < b ? a : b,
-      );
+      math.min(selectionStartRow!, selectionEndRow!);
 
   int get maxSelectedRow =>
-      [selectionStartRow!, selectionEndRow!].reduce(
-        (a, b) => a > b ? a : b,
-      );
+      math.max(selectionStartRow!, selectionEndRow!);
 
   int get minSelectedCol =>
-      [selectionStartCol!, selectionEndCol!].reduce(
-        (a, b) => a < b ? a : b,
-      );
+      math.min(selectionStartCol!, selectionEndCol!);
 
   int get maxSelectedCol =>
-      [selectionStartCol!, selectionEndCol!].reduce(
-        (a, b) => a > b ? a : b,
-      );
+      math.max(selectionStartCol!, selectionEndCol!);
 
   bool _isSelected(int row, int col) {
     if (selectedCellCount == 0) return false;
-
     return row >= minSelectedRow &&
         row <= maxSelectedRow &&
         col >= minSelectedCol &&
@@ -394,32 +449,9 @@ class _StudioHomeState extends State<StudioHome> {
     });
   }
 
-  void _updateSelection(Offset position) {
-    const rpmWidth = 78.0;
-    const cellWidth = 48.0;
-    const headerHeight = 34.0;
-    const rowHeight = 31.0;
-
-    if (position.dx < rpmWidth ||
-        position.dy < headerHeight) {
-      return;
-    }
-
-    final col =
-        ((position.dx - rpmWidth) / cellWidth).floor();
-    final row =
-        ((position.dy - headerHeight) / rowHeight).floor();
-
-    final safeRow = row.clamp(0, 34).toInt();
-    final safeCol = col.clamp(0, 50).toInt();
-
-    setState(() {
-      selectionEndRow = safeRow;
-      selectionEndCol = safeCol;
-    });
-  }
-
   double _selectionAverage() {
+    if (selectedCellCount == 0) return 0;
+
     final data = _map(activeMap);
     double total = 0;
     int count = 0;
@@ -430,17 +462,166 @@ class _StudioHomeState extends State<StudioHome> {
         count++;
       }
     }
-
     return count == 0 ? 0 : total / count;
+  }
+
+  void _selectFromGlobal(Offset globalPosition) {
+    final box = mapContentKey.currentContext?.findRenderObject()
+        as RenderBox?;
+    if (box == null || !box.hasSize) return;
+
+    final p = box.globalToLocal(globalPosition);
+
+    final rpmWidth = 78.0 * zoom;
+    final cellWidth = 48.0 * zoom;
+    final headerHeight = 34.0 * zoom;
+    final rowHeight = 31.0 * zoom;
+
+    if (p.dx < rpmWidth || p.dy < headerHeight) return;
+
+    final col = ((p.dx - rpmWidth) / cellWidth)
+        .floor()
+        .clamp(0, 50)
+        .toInt();
+
+    final row = ((p.dy - headerHeight) / rowHeight)
+        .floor()
+        .clamp(0, 34)
+        .toInt();
+
+    if (selectionStartRow == null) {
+      _selectCell(row, col);
+    } else {
+      setState(() {
+        selectionEndRow = row;
+        selectionEndCol = col;
+      });
+    }
+  }
+
+  void _startSelectionPointer(PointerEvent event) {
+    if (!rangeSelectMode) return;
+
+    lastPointerGlobal = event.position;
+    lastPointerLocal = event.localPosition;
+
+    final box = mapContentKey.currentContext?.findRenderObject()
+        as RenderBox?;
+    if (box == null) return;
+
+    final p = box.globalToLocal(event.position);
+    final rpmWidth = 78.0 * zoom;
+    final headerHeight = 34.0 * zoom;
+
+    if (p.dx < rpmWidth || p.dy < headerHeight) return;
+
+    final col = ((p.dx - rpmWidth) / (48.0 * zoom))
+        .floor()
+        .clamp(0, 50)
+        .toInt();
+    final row = ((p.dy - headerHeight) / (31.0 * zoom))
+        .floor()
+        .clamp(0, 34)
+        .toInt();
+
+    _selectCell(row, col);
+    _startAutoScroll();
+  }
+
+  void _moveSelectionPointer(PointerEvent event) {
+    if (!rangeSelectMode || selectionStartRow == null) return;
+    lastPointerGlobal = event.position;
+    lastPointerLocal = event.localPosition;
+    _selectFromGlobal(event.position);
+  }
+
+  void _endSelectionPointer(PointerEvent event) {
+    _stopAutoScroll();
+    lastPointerGlobal = null;
+    lastPointerLocal = null;
+  }
+
+  // Auto scroll while dragging near the visible edges.
+  void _startAutoScroll() {
+    if (!autoScrollEnabled || autoScrollTimer != null) return;
+
+    autoScrollTimer = Timer.periodic(
+      const Duration(milliseconds: 80),
+      (_) {
+        if (!mounted ||
+            !rangeSelectMode ||
+            lastPointerLocal == null) {
+          return;
+        }
+
+        final viewport = mapViewportKey.currentContext
+            ?.findRenderObject() as RenderBox?;
+
+        if (viewport == null || !viewport.hasSize) return;
+
+        final p = lastPointerLocal!;
+        final width = viewport.size.width;
+        final height = viewport.size.height;
+
+        const edge = 45.0;
+        const step = 28.0;
+
+        if (p.dx < edge && mapHorizontalController.hasClients) {
+          final next = (mapHorizontalController.offset - step)
+              .clamp(
+                0.0,
+                mapHorizontalController.position.maxScrollExtent,
+              )
+              .toDouble();
+          mapHorizontalController.jumpTo(next);
+        } else if (p.dx > width - edge &&
+            mapHorizontalController.hasClients) {
+          final next = (mapHorizontalController.offset + step)
+              .clamp(
+                0.0,
+                mapHorizontalController.position.maxScrollExtent,
+              )
+              .toDouble();
+          mapHorizontalController.jumpTo(next);
+        }
+
+        if (p.dy < edge && mapVerticalController.hasClients) {
+          final next = (mapVerticalController.offset - step)
+              .clamp(
+                0.0,
+                mapVerticalController.position.maxScrollExtent,
+              )
+              .toDouble();
+          mapVerticalController.jumpTo(next);
+        } else if (p.dy > height - edge &&
+            mapVerticalController.hasClients) {
+          final next = (mapVerticalController.offset + step)
+              .clamp(
+                0.0,
+                mapVerticalController.position.maxScrollExtent,
+              )
+              .toDouble();
+          mapVerticalController.jumpTo(next);
+        }
+
+        if (lastPointerGlobal != null) {
+          _selectFromGlobal(lastPointerGlobal!);
+        }
+      },
+    );
+  }
+
+  void _stopAutoScroll() {
+    autoScrollTimer?.cancel();
+    autoScrollTimer = null;
   }
 
   void _applyAverage() {
     if (selectedCellCount == 0) return;
-
     final average = _selectionAverage();
     final data = _map(activeMap);
-
     _history();
+
     setState(() {
       for (int r = minSelectedRow; r <= maxSelectedRow; r++) {
         for (int c = minSelectedCol; c <= maxSelectedCol; c++) {
@@ -458,31 +639,30 @@ class _StudioHomeState extends State<StudioHome> {
     _history();
 
     setState(() {
-      final rows = minSelectedRow;
-      final rowEnd = maxSelectedRow;
-      final cols = minSelectedCol;
-      final colEnd = maxSelectedCol;
+      final r1 = minSelectedRow;
+      final r2 = maxSelectedRow;
+      final c1 = minSelectedCol;
+      final c2 = maxSelectedCol;
 
-      if (cols != colEnd) {
-        for (int r = rows; r <= rowEnd; r++) {
-          final start = data[r][cols];
-          final end = data[r][colEnd];
+      if (c1 != c2) {
+        for (int r = r1; r <= r2; r++) {
+          final start = data[r][c1];
+          final end = data[r][c2];
 
-          for (int c = cols; c <= colEnd; c++) {
-            final t = (c - cols) / (colEnd - cols);
+          for (int c = c1; c <= c2; c++) {
+            final t = (c - c1) / (c2 - c1);
             data[r][c] = start + (end - start) * t;
           }
         }
-      } else if (rows != rowEnd) {
-        final start = data[rows][cols];
-        final end = data[rowEnd][cols];
+      } else if (r1 != r2) {
+        final start = data[r1][c1];
+        final end = data[r2][c1];
 
-        for (int r = rows; r <= rowEnd; r++) {
-          final t = (r - rows) / (rowEnd - rows);
-          data[r][cols] = start + (end - start) * t;
+        for (int r = r1; r <= r2; r++) {
+          final t = (r - r1) / (r2 - r1);
+          data[r][c1] = start + (end - start) * t;
         }
       }
-
       saved = false;
     });
   }
@@ -516,8 +696,8 @@ class _StudioHomeState extends State<StudioHome> {
           ),
           FilledButton(
             onPressed: () {
-              final number = double.tryParse(controller.text);
-              if (number != null) Navigator.pop(context, number);
+              final n = double.tryParse(controller.text);
+              if (n != null) Navigator.pop(context, n);
             },
             child: const Text('ตกลง'),
           ),
@@ -534,15 +714,13 @@ class _StudioHomeState extends State<StudioHome> {
       for (int r = minSelectedRow; r <= maxSelectedRow; r++) {
         for (int c = minSelectedCol; c <= maxSelectedCol; c++) {
           double result = data[r][c];
-
           if (operation == '+') result += value;
           if (operation == '-') result -= value;
           if (operation == '×') result *= value;
 
-          data[r][c] = result.clamp(
-            _minimum(activeMap),
-            _maximum(activeMap),
-          );
+          data[r][c] = result
+              .clamp(_minimum(activeMap), _maximum(activeMap))
+              .toDouble();
         }
       }
       saved = false;
@@ -554,7 +732,6 @@ class _StudioHomeState extends State<StudioHome> {
 
     final data = _map(activeMap);
     final old = _copyMap(data);
-
     _history();
 
     setState(() {
@@ -585,9 +762,9 @@ class _StudioHomeState extends State<StudioHome> {
     });
   }
 
-  // ----------------------------------------------------------
-  // UI
-  // ----------------------------------------------------------
+  // ==========================================================
+  // MAIN UI
+  // ==========================================================
 
   @override
   Widget build(BuildContext context) {
@@ -652,21 +829,16 @@ class _StudioHomeState extends State<StudioHome> {
               itemCount: items.length,
               itemBuilder: (context, index) {
                 final selected = page == index;
-
                 return InkWell(
                   onTap: () {
+                    _stopAutoScroll();
                     setState(() {
                       page = index;
-
                       if (index == 1) activeMap = MapType.fuel;
                       if (index == 2) activeMap = MapType.ignition;
                       if (index == 3) activeMap = MapType.afr;
-
                       rangeSelectMode = false;
-                      selectionStartRow = null;
-                      selectionStartCol = null;
-                      selectionEndRow = null;
-                      selectionEndCol = null;
+                      _clearSelection();
                     });
                   },
                   child: Container(
@@ -700,9 +872,7 @@ class _StudioHomeState extends State<StudioHome> {
                             items[index][0] as String,
                             style: TextStyle(
                               fontSize: 11,
-                              color: selected
-                                  ? Colors.white
-                                  : muted,
+                              color: selected ? Colors.white : muted,
                               fontWeight: selected
                                   ? FontWeight.bold
                                   : FontWeight.normal,
@@ -721,10 +891,7 @@ class _StudioHomeState extends State<StudioHome> {
             child: Text(
               'LOCAL EDITOR\nNO ECU LINK',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                color: orange,
-                fontSize: 9,
-              ),
+              style: TextStyle(color: orange, fontSize: 9),
             ),
           ),
         ],
@@ -741,11 +908,7 @@ class _StudioHomeState extends State<StudioHome> {
       case 3:
         return _mapEditor();
       case 4:
-        return _infoPage(
-          'GRAPH',
-          'พื้นที่แสดงกราฟ 2D / 3D\nอยู่ระหว่างพัฒนา',
-          Icons.show_chart,
-        );
+        return _graphPage();
       case 5:
         return _infoPage(
           'DATA LOGGER',
@@ -757,11 +920,7 @@ class _StudioHomeState extends State<StudioHome> {
       case 7:
         return _ecuPage();
       default:
-        return _infoPage(
-          'SETTINGS',
-          'ตั้งค่าระบบแอปพลิเคชัน',
-          Icons.settings,
-        );
+        return _settingsPage();
     }
   }
 
@@ -893,10 +1052,7 @@ class _StudioHomeState extends State<StudioHome> {
                   child: const Text(
                     'คำเตือน: ค่านี้เป็นข้อมูลตัวอย่างสำหรับแก้ไขแผนที่ในแอปเท่านั้น '
                     'ยังไม่ได้เชื่อมต่อ ECU จริง และไม่ใช่ค่าจูนที่รับรองความปลอดภัย',
-                    style: TextStyle(
-                      color: orange,
-                      fontSize: 11,
-                    ),
+                    style: TextStyle(color: orange, fontSize: 11),
                   ),
                 ),
               ],
@@ -935,10 +1091,7 @@ class _StudioHomeState extends State<StudioHome> {
             ),
             Text(
               title,
-              style: const TextStyle(
-                fontSize: 9,
-                color: muted,
-              ),
+              style: const TextStyle(fontSize: 9, color: muted),
             ),
           ],
         ),
@@ -969,14 +1122,16 @@ class _StudioHomeState extends State<StudioHome> {
     );
   }
 
+  // ==========================================================
+  // MAP EDITOR WITH ZOOM AND AUTO SCROLL
+  // ==========================================================
+
   Widget _mapEditor() {
     final data = _map(activeMap);
-
-    const rpmWidth = 78.0;
-    const cellWidth = 48.0;
-    const headerHeight = 34.0;
-    const rowHeight = 31.0;
-
+    final rpmWidth = 78.0 * zoom;
+    final cellWidth = 48.0 * zoom;
+    final headerHeight = 34.0 * zoom;
+    final rowHeight = 31.0 * zoom;
     final canSelectRange = activeMap != MapType.afr;
 
     return Column(
@@ -987,7 +1142,6 @@ class _StudioHomeState extends State<StudioHome> {
           '35 RPM POINTS × 51 TPS POINTS',
         ),
 
-        // MAP SELECTOR
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Wrap(
@@ -1000,9 +1154,8 @@ class _StudioHomeState extends State<StudioHome> {
           ),
         ),
 
-        const SizedBox(height: 8),
+        const SizedBox(height: 5),
 
-        // TOOLBAR
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -1017,6 +1170,7 @@ class _StudioHomeState extends State<StudioHome> {
                 selectedColor: blue.withOpacity(0.3),
                 onSelected: canSelectRange
                     ? (value) {
+                        _stopAutoScroll();
                         setState(() {
                           rangeSelectMode = value;
                           _clearSelection();
@@ -1024,7 +1178,7 @@ class _StudioHomeState extends State<StudioHome> {
                       }
                     : null,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               if (rangeSelectMode) ...[
                 _rangeButton(
                   'AVERAGE',
@@ -1076,6 +1230,31 @@ class _StudioHomeState extends State<StudioHome> {
                 ),
               ],
               IconButton(
+                tooltip: 'Zoom out',
+                onPressed: () => _changeZoom(-0.1),
+                icon: const Icon(Icons.zoom_out),
+              ),
+              Text(
+                '${(zoom * 100).round()}%',
+                style: const TextStyle(
+                  color: cyan,
+                  fontSize: 10,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Zoom in',
+                onPressed: () => _changeZoom(0.1),
+                icon: const Icon(Icons.zoom_in),
+              ),
+              IconButton(
+                tooltip: 'Reset zoom',
+                onPressed: () {
+                  setState(() => zoom = 1.0);
+                  _saveZoom();
+                },
+                icon: const Icon(Icons.fit_screen),
+              ),
+              IconButton(
                 tooltip: 'Undo',
                 onPressed: undoStack.isEmpty ? null : _undo,
                 icon: const Icon(Icons.undo),
@@ -1097,27 +1276,44 @@ class _StudioHomeState extends State<StudioHome> {
         if (rangeSelectMode)
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 2, 14, 7),
-            child: Text(
-              'เลือกแล้ว $selectedCellCount ช่อง'
-              '${selectedCellCount > 0 ? '  |  เฉลี่ย ${_selectionAverage().toStringAsFixed(2)}' : ''}',
-              style: const TextStyle(
-                color: cyan,
-                fontSize: 11,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'เลือกแล้ว $selectedCellCount ช่อง'
+                    '${selectedCellCount > 0 ? '  |  เฉลี่ย ${_selectionAverage().toStringAsFixed(2)}' : ''}',
+                    style: const TextStyle(
+                      color: cyan,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+                const Text(
+                  'AUTO SCROLL',
+                  style: TextStyle(color: muted, fontSize: 9),
+                ),
+                Switch(
+                  value: autoScrollEnabled,
+                  onChanged: (v) {
+                    setState(() => autoScrollEnabled = v);
+                    if (!v) _stopAutoScroll();
+                  },
+                ),
+              ],
             ),
           )
         else
           const Padding(
             padding: EdgeInsets.fromLTRB(14, 2, 14, 7),
             child: Text(
-              'ดับเบิลแทปที่ช่องเพื่อแก้ไขค่า',
+              'ดับเบิลแทปที่ช่องเพื่อแก้ไขค่า | ใช้ปุ่ม + / − เพื่อซูม',
               style: TextStyle(color: muted, fontSize: 10),
             ),
           ),
 
-        // MAP GRID
         Expanded(
           child: Container(
+            key: mapViewportKey,
             margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
             decoration: BoxDecoration(
               color: panel,
@@ -1125,71 +1321,22 @@ class _StudioHomeState extends State<StudioHome> {
               border: Border.all(color: panel2),
             ),
             clipBehavior: Clip.antiAlias,
-            child: SingleChildScrollView(
-              controller: mapHorizontalController,
-              scrollDirection: Axis.horizontal,
-              physics: rangeSelectMode
-                  ? const NeverScrollableScrollPhysics()
-                  : const ClampingScrollPhysics(),
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: _startSelectionPointer,
+              onPointerMove: _moveSelectionPointer,
+              onPointerUp: _endSelectionPointer,
+              onPointerCancel: _endSelectionPointer,
               child: SingleChildScrollView(
-                controller: mapVerticalController,
-                physics: rangeSelectMode
-                    ? const NeverScrollableScrollPhysics()
-                    : const ClampingScrollPhysics(),
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onPanStart: rangeSelectMode
-                      ? (details) {
-                          final p = details.localPosition;
-                          if (p.dx < rpmWidth ||
-                              p.dy < headerHeight) {
-                            return;
-                          }
-
-                          final col = ((p.dx - rpmWidth) /
-                                  cellWidth)
-                              .floor()
-                              .clamp(0, 50)
-                              .toInt();
-                          final row = ((p.dy - headerHeight) /
-                                  rowHeight)
-                              .floor()
-                              .clamp(0, 34)
-                              .toInt();
-
-                          _selectCell(row, col);
-                        }
-                      : null,
-                  onPanUpdate: rangeSelectMode
-                      ? (details) {
-                          _updateSelection(details.localPosition);
-                        }
-                      : null,
-                  onTapUp: rangeSelectMode
-                      ? (details) {
-                          final p = details.localPosition;
-                          if (p.dx < rpmWidth ||
-                              p.dy < headerHeight) {
-                            return;
-                          }
-
-                          final col = ((p.dx - rpmWidth) /
-                                  cellWidth)
-                              .floor()
-                              .clamp(0, 50)
-                              .toInt();
-                          final row = ((p.dy - headerHeight) /
-                                  rowHeight)
-                              .floor()
-                              .clamp(0, 34)
-                              .toInt();
-
-                          _selectCell(row, col);
-                        }
-                      : null,
+                controller: mapHorizontalController,
+                scrollDirection: Axis.horizontal,
+                physics: const ClampingScrollPhysics(),
+                child: SingleChildScrollView(
+                  controller: mapVerticalController,
+                  physics: const ClampingScrollPhysics(),
                   child: Column(
+                    key: mapContentKey,
                     children: [
-                      // TPS HEADER
                       Row(
                         children: [
                           Container(
@@ -1197,11 +1344,11 @@ class _StudioHomeState extends State<StudioHome> {
                             height: headerHeight,
                             alignment: Alignment.center,
                             color: panel2,
-                            child: const Text(
+                            child: Text(
                               'RPM / TPS',
                               style: TextStyle(
                                 color: cyan,
-                                fontSize: 10,
+                                fontSize: 10 * zoom,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
@@ -1222,17 +1369,15 @@ class _StudioHomeState extends State<StudioHome> {
                               ),
                               child: Text(
                                 '${tpsAxis[col]}',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: muted,
-                                  fontSize: 9,
+                                  fontSize: 9 * zoom,
                                 ),
                               ),
                             );
                           }),
                         ],
                       ),
-
-                      // RPM ROWS + MAP CELLS
                       ...List.generate(35, (row) {
                         return Row(
                           children: [
@@ -1255,17 +1400,16 @@ class _StudioHomeState extends State<StudioHome> {
                               ),
                               child: Text(
                                 '${rpmAxis[row]}',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: cyan,
-                                  fontSize: 9,
+                                  fontSize: 9 * zoom,
                                 ),
                               ),
                             ),
                             ...List.generate(51, (col) {
-                              final selected =
-                                  _isSelected(row, col);
-
+                              final selected = _isSelected(row, col);
                               return GestureDetector(
+                                behavior: HitTestBehavior.opaque,
                                 onDoubleTap: rangeSelectMode
                                     ? null
                                     : () => _editCell(row, col),
@@ -1275,12 +1419,10 @@ class _StudioHomeState extends State<StudioHome> {
                                   alignment: Alignment.center,
                                   decoration: BoxDecoration(
                                     color: selected
-                                        ? blue.withOpacity(0.38)
+                                        ? blue.withOpacity(0.48)
                                         : _cellColor(data[row][col]),
                                     border: Border.all(
-                                      color: selected
-                                          ? cyan
-                                          : bg,
+                                      color: selected ? cyan : bg,
                                       width: selected ? 1.5 : 0.5,
                                     ),
                                   ),
@@ -1290,7 +1432,7 @@ class _StudioHomeState extends State<StudioHome> {
                                       color: selected
                                           ? Colors.white
                                           : Colors.white70,
-                                      fontSize: 9,
+                                      fontSize: 9 * zoom,
                                       fontWeight: selected
                                           ? FontWeight.bold
                                           : FontWeight.normal,
@@ -1316,18 +1458,12 @@ class _StudioHomeState extends State<StudioHome> {
             children: [
               Text(
                 '${_mapName(activeMap)}  |  ${_mapUnit(activeMap)}',
-                style: const TextStyle(
-                  color: muted,
-                  fontSize: 9,
-                ),
+                style: const TextStyle(color: muted, fontSize: 9),
               ),
               const Spacer(),
               const Text(
                 'DOUBLE TAP = EDIT',
-                style: TextStyle(
-                  color: muted,
-                  fontSize: 9,
-                ),
+                style: TextStyle(color: muted, fontSize: 9),
               ),
             ],
           ),
@@ -1338,7 +1474,6 @@ class _StudioHomeState extends State<StudioHome> {
 
   Widget _mapChip(String label, MapType type) {
     final selected = activeMap == type;
-
     return ChoiceChip(
       label: Text(label, style: const TextStyle(fontSize: 10)),
       selected: selected,
@@ -1346,14 +1481,8 @@ class _StudioHomeState extends State<StudioHome> {
       onSelected: (_) {
         setState(() {
           activeMap = type;
-          selectionStartRow = null;
-          selectionStartCol = null;
-          selectionEndRow = null;
-          selectionEndCol = null;
-
-          if (type == MapType.afr) {
-            rangeSelectMode = false;
-          }
+          _clearSelection();
+          if (type == MapType.afr) rangeSelectMode = false;
         });
       },
     );
@@ -1365,12 +1494,323 @@ class _StudioHomeState extends State<StudioHome> {
       if (value < 14) return orange.withOpacity(0.25);
       return green.withOpacity(0.2);
     }
-
     if (value < 30) return red.withOpacity(0.25);
     if (value < 80) return orange.withOpacity(0.22);
     if (value < 140) return green.withOpacity(0.2);
     return blue.withOpacity(0.25);
   }
+
+  // ==========================================================
+  // GRAPH PAGE
+  // ==========================================================
+
+  Widget _graphPage() {
+    final data = _map(activeMap);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _header('GRAPH', 'LIVE VIEW OF SELECTED LOCAL MAP'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Wrap(
+            spacing: 8,
+            children: [
+              _mapChip('FUEL', MapType.fuel),
+              _mapChip('IGNITION', MapType.ignition),
+              _mapChip('AFR', MapType.afr),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: SegmentedButton<GraphMode>(
+            segments: const [
+              ButtonSegment(
+                value: GraphMode.twoD,
+                label: Text('2D GRAPH'),
+                icon: Icon(Icons.show_chart),
+              ),
+              ButtonSegment(
+                value: GraphMode.threeD,
+                label: Text('3D SURFACE'),
+                icon: Icon(Icons.view_in_ar),
+              ),
+            ],
+            selected: {graphMode},
+            onSelectionChanged: (selection) {
+              setState(() => graphMode = selection.first);
+            },
+          ),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: panel,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: panel2),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${_mapName(activeMap)}  (${_mapUnit(activeMap)})',
+                        style: const TextStyle(
+                          color: cyan,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    if (graphMode == GraphMode.threeD)
+                      IconButton(
+                        tooltip: 'หมุนกราฟ',
+                        onPressed: () {
+                          setState(() => graphRotation += 0.15);
+                        },
+                        icon: const Icon(Icons.rotate_right),
+                      ),
+                  ],
+                ),
+                Expanded(
+                  child: ClipRect(
+                    child: CustomPaint(
+                      painter: MapGraphPainter(
+                        data: data,
+                        mode: graphMode,
+                        rotation: graphRotation,
+                        minimum: _minimum(activeMap),
+                        maximum: _maximum(activeMap),
+                      ),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  graphMode == GraphMode.twoD
+                      ? 'กราฟ 2D: แสดงค่าเฉลี่ยตามรอบเครื่องยนต์'
+                      : 'กราฟ 3D: แสดงพื้นผิวของ Map ที่เลือก',
+                  style: const TextStyle(
+                    color: muted,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ==========================================================
+  // SETTINGS PAGE
+  // ==========================================================
+
+  Widget _settingsPage() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _header('SETTINGS', 'APPLICATION CONFIGURATION'),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: panel,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: panel2),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.screen_rotation, color: cyan),
+                        SizedBox(width: 10),
+                        Text(
+                          'SCREEN ORIENTATION',
+                          style: TextStyle(
+                            color: cyan,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    const Text(
+                      'เลือกรูปแบบการหมุนหน้าจอ',
+                      style: TextStyle(color: muted, fontSize: 12),
+                    ),
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<String>(
+                      value: orientationMode,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Orientation',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Portrait',
+                          child: Text('Portrait - แนวตั้ง'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Landscape',
+                          child: Text('Landscape - แนวนอน'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Auto Rotate',
+                          child: Text('Auto Rotate - หมุนอัตโนมัติ'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          _saveOrientation(value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'ค่าปัจจุบัน: $orientationMode',
+                      style: const TextStyle(
+                        color: green,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: panel,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: panel2),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.zoom_in, color: cyan),
+                        SizedBox(width: 10),
+                        Text(
+                          'MAP ZOOM',
+                          style: TextStyle(
+                            color: cyan,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    Text(
+                      'ขนาดตาราง ${(zoom * 100).round()}%',
+                      style: const TextStyle(color: muted),
+                    ),
+                    Slider(
+                      value: zoom,
+                      min: 0.65,
+                      max: 1.5,
+                      divisions: 17,
+                      label: '${(zoom * 100).round()}%',
+                      onChanged: (value) {
+                        setState(() => zoom = value);
+                      },
+                      onChangeEnd: (_) => _saveZoom(),
+                    ),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () {
+                            setState(() => zoom = 1.0);
+                            _saveZoom();
+                          },
+                          child: const Text('RESET ZOOM'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: panel,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: panel2),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'MAP EDITOR',
+                      style: TextStyle(
+                        color: cyan,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Auto Scroll while selecting',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      subtitle: const Text(
+                        'เลื่อนตารางอัตโนมัติเมื่อลากเลือกใกล้ขอบ',
+                        style: TextStyle(fontSize: 10, color: muted),
+                      ),
+                      value: autoScrollEnabled,
+                      onChanged: (value) {
+                        setState(() => autoScrollEnabled = value);
+                        if (!value) _stopAutoScroll();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: orange.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: orange.withOpacity(0.4),
+                  ),
+                ),
+                child: const Text(
+                  'หมายเหตุ: แอปในเวอร์ชันนี้เป็น Local Map Editor '
+                  'ยังไม่มีระบบสื่อสารกับ ECU จริง การแสดงกราฟใช้ข้อมูลใน Map '
+                  'ที่จัดเก็บอยู่ภายในแอปเท่านั้น',
+                  style: TextStyle(
+                    color: orange,
+                    fontSize: 11,
+                    height: 1.6,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ==========================================================
+  // OTHER PAGES
+  // ==========================================================
 
   Widget _infoPage(
     String title,
@@ -1451,10 +1891,7 @@ class _StudioHomeState extends State<StudioHome> {
                 const SizedBox(height: 12),
                 const Text(
                   'JSON / CSV Import-Export ยังไม่เปิดใช้งาน',
-                  style: TextStyle(
-                    color: muted,
-                    fontSize: 10,
-                  ),
+                  style: TextStyle(color: muted, fontSize: 10),
                 ),
               ],
             ),
@@ -1514,5 +1951,259 @@ class _StudioHomeState extends State<StudioHome> {
         ),
       ],
     );
+  }
+}
+
+// ============================================================
+// GRAPH PAINTER
+// 2D line graph and 3D projected surface
+// ============================================================
+
+class MapGraphPainter extends CustomPainter {
+  final List<List<double>> data;
+  final GraphMode mode;
+  final double rotation;
+  final double minimum;
+  final double maximum;
+
+  MapGraphPainter({
+    required this.data,
+    required this.mode,
+    required this.rotation,
+    required this.minimum,
+    required this.maximum,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+
+    if (mode == GraphMode.twoD) {
+      _paint2D(canvas, size);
+    } else {
+      _paint3D(canvas, size);
+    }
+  }
+
+  void _paintGrid(Canvas canvas, Size size, Rect area) {
+    final paint = Paint()
+      ..color = panel2
+      ..strokeWidth = 1;
+
+    for (int i = 0; i <= 5; i++) {
+      final y = area.top + area.height * i / 5;
+      canvas.drawLine(
+        Offset(area.left, y),
+        Offset(area.right, y),
+        paint,
+      );
+    }
+
+    for (int i = 0; i <= 5; i++) {
+      final x = area.left + area.width * i / 5;
+      canvas.drawLine(
+        Offset(x, area.top),
+        Offset(x, area.bottom),
+        paint,
+      );
+    }
+  }
+
+  void _paint2D(Canvas canvas, Size size) {
+    final area = Rect.fromLTWH(
+      48,
+      18,
+      math.max(1, size.width - 65),
+      math.max(1, size.height - 55),
+    );
+
+    _paintGrid(canvas, size, area);
+
+    final line = Paint()
+      ..color = cyan
+      ..strokeWidth = 2.2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final fill = Paint()
+      ..color = blue.withOpacity(0.12)
+      ..style = PaintingStyle.fill;
+
+    final path = Path();
+    final fillPath = Path();
+
+    final minValue = data
+        .expand((row) => row)
+        .reduce(math.min);
+    final maxValue = data
+        .expand((row) => row)
+        .reduce(math.max);
+
+    final range = math.max(0.001, maxValue - minValue);
+
+    for (int r = 0; r < data.length; r++) {
+      double total = 0;
+      for (int c = 0; c < data[r].length; c++) {
+        total += data[r][c];
+      }
+
+      final average = total / data[r].length;
+      final x = area.left + area.width * r / (data.length - 1);
+      final y = area.bottom -
+          ((average - minValue) / range) * area.height;
+
+      if (r == 0) {
+        path.moveTo(x, y);
+        fillPath.moveTo(x, area.bottom);
+        fillPath.lineTo(x, y);
+      } else {
+        path.lineTo(x, y);
+        fillPath.lineTo(x, y);
+      }
+    }
+
+    fillPath.lineTo(area.right, area.bottom);
+    fillPath.close();
+
+    canvas.drawPath(fillPath, fill);
+    canvas.drawPath(path, line);
+
+    final dotPaint = Paint()..color = cyan;
+    for (int r = 0; r < data.length; r += 4) {
+      final average =
+          data[r].reduce((a, b) => a + b) / data[r].length;
+      final x = area.left + area.width * r / (data.length - 1);
+      final y = area.bottom -
+          ((average - minValue) / range) * area.height;
+      canvas.drawCircle(Offset(x, y), 3, dotPaint);
+    }
+
+    _drawText(
+      canvas,
+      'RPM',
+      Offset(area.center.dx, size.height - 14),
+    );
+    _drawText(
+      canvas,
+      'VALUE',
+      Offset(8, area.top + 5),
+    );
+  }
+
+  void _paint3D(Canvas canvas, Size size) {
+    final centerX = size.width / 2;
+    final baseY = size.height * 0.78;
+    final scaleX = size.width * 0.78 / 50;
+    final scaleY = size.height * 0.55 / 34;
+    final heightScale = size.height * 0.48;
+
+    final minValue = data
+        .expand((row) => row)
+        .reduce(math.min);
+    final maxValue = data
+        .expand((row) => row)
+        .reduce(math.max);
+    final range = math.max(0.001, maxValue - minValue);
+
+    Offset project(int r, int c, double value) {
+      final x = (c - 25) * scaleX;
+      final z = (r - 17) * scaleY;
+      final h = ((value - minValue) / range) * heightScale;
+
+      final cosR = math.cos(rotation);
+      final sinR = math.sin(rotation);
+
+      final rotatedX = x * cosR - z * sinR;
+      final rotatedZ = x * sinR + z * cosR;
+
+      return Offset(
+        centerX + rotatedX,
+        baseY - h - rotatedZ * 0.42,
+      );
+    }
+
+    final gridPaint = Paint()
+      ..color = panel2
+      ..strokeWidth = 0.7
+      ..style = PaintingStyle.stroke;
+
+    final surfacePaint = Paint()
+      ..color = cyan.withOpacity(0.85)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+
+    // Draw longitudinal surface lines.
+    for (int r = 0; r < 35; r += 2) {
+      final path = Path();
+      for (int c = 0; c < 51; c += 2) {
+        final point = project(r, c, data[r][c]);
+        if (c == 0) {
+          path.moveTo(point.dx, point.dy);
+        } else {
+          path.lineTo(point.dx, point.dy);
+        }
+      }
+      canvas.drawPath(path, surfacePaint);
+    }
+
+    // Draw cross surface lines.
+    for (int c = 0; c < 51; c += 3) {
+      final path = Path();
+      for (int r = 0; r < 35; r += 2) {
+        final point = project(r, c, data[r][c]);
+        if (r == 0) {
+          path.moveTo(point.dx, point.dy);
+        } else {
+          path.lineTo(point.dx, point.dy);
+        }
+      }
+      canvas.drawPath(path, gridPaint);
+    }
+
+    // Base axes.
+    final axisPaint = Paint()
+      ..color = muted
+      ..strokeWidth = 1.2;
+
+    canvas.drawLine(
+      Offset(centerX - size.width * 0.38, baseY),
+      Offset(centerX + size.width * 0.38, baseY),
+      axisPaint,
+    );
+
+    _drawText(
+      canvas,
+      'TPS',
+      Offset(size.width - 30, baseY + 12),
+    );
+    _drawText(
+      canvas,
+      'RPM',
+      Offset(22, baseY + 10),
+    );
+  }
+
+  void _drawText(Canvas canvas, String text, Offset position) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(
+          color: muted,
+          fontSize: 10,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    painter.paint(canvas, position);
+  }
+
+  @override
+  bool shouldRepaint(covariant MapGraphPainter oldDelegate) {
+    return oldDelegate.data != data ||
+        oldDelegate.mode != mode ||
+        oldDelegate.rotation != rotation ||
+        oldDelegate.minimum != minimum ||
+        oldDelegate.maximum != maximum;
   }
 }

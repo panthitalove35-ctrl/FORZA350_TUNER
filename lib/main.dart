@@ -82,8 +82,8 @@ class _StudioHomeState extends State<StudioHome> {
   final ScrollController mapVerticalController =
       ScrollController();
 
-  final List<List<List<double>>> undoStack = [];
-  final List<List<List<double>>> redoStack = [];
+  final List<List<List<List<double>>>> undoStack = [];
+  final List<List<List<List<double>>>> redoStack = [];
 
   @override
   void initState() {

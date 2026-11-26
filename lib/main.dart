@@ -13,24 +13,33 @@ void main() async {
 }
 
 // ============================================================
-// FORZA REMAP STUDIO
-// Local map editor - ECU communication not implemented
+// FORZA REMAP STUDIO PRO
+// Compact Professional ECU Interface
+// Local Map Editor - ECU communication not implemented
 // ============================================================
 
-const Color bg = Color(0xFF0B0F14);
-const Color panel = Color(0xFF151C25);
-const Color panel2 = Color(0xFF1C2632);
-const Color blue = Color(0xFF258BFF);
-const Color cyan = Color(0xFF36C9E8);
-const Color green = Color(0xFF39C982);
-const Color orange = Color(0xFFFFB74D);
-const Color red = Color(0xFFEF5350);
-const Color muted = Color(0xFF8C9AAA);
+const Color bg = Color(0xFF07111C);
+const Color panel = Color(0xFF101D2B);
+const Color panel2 = Color(0xFF17283A);
+const Color panel3 = Color(0xFF20364C);
+
+const Color blue = Color(0xFF168BFF);
+const Color cyan = Color(0xFF25C9E8);
+const Color green = Color(0xFF35D39A);
+const Color orange = Color(0xFFFFA940);
+const Color red = Color(0xFFFF5B64);
+const Color muted = Color(0xFF8EA4B8);
+
+const int rpmStart = 1500;
+const int rpmStep = 250;
+const int rpmCount = 55;
+const int tpsCount = 51;
 
 final List<int> rpmAxis =
-    List<int>.generate(35, (i) => 1500 + i * 250);
+    List<int>.generate(rpmCount, (i) => rpmStart + i * rpmStep);
+
 final List<int> tpsAxis =
-    List<int>.generate(51, (i) => i * 2);
+    List<int>.generate(tpsCount, (i) => i * 2);
 
 enum MapType { fuel, ignition, afr }
 enum GraphMode { twoD, threeD }
@@ -67,6 +76,7 @@ class StudioHome extends StatefulWidget {
 
 class _StudioHomeState extends State<StudioHome> {
   int page = 0;
+
   MapType activeMap = MapType.fuel;
   GraphMode graphMode = GraphMode.twoD;
 
@@ -78,10 +88,10 @@ class _StudioHomeState extends State<StudioHome> {
   bool rangeSelectMode = false;
   bool autoScrollEnabled = true;
 
-  double zoom = 1.0;
+  double zoom = 0.85;
   double graphRotation = 0;
 
-  String orientationMode = 'Auto Rotate';
+  String orientationMode = 'Landscape';
 
   int? selectionStartRow;
   int? selectionStartCol;
@@ -90,6 +100,7 @@ class _StudioHomeState extends State<StudioHome> {
 
   final ScrollController mapHorizontalController =
       ScrollController();
+
   final ScrollController mapVerticalController =
       ScrollController();
 
@@ -97,8 +108,9 @@ class _StudioHomeState extends State<StudioHome> {
   final GlobalKey mapContentKey = GlobalKey();
 
   Timer? autoScrollTimer;
+
   Offset? lastPointerGlobal;
-  Offset? lastPointerLocal;
+  Offset? lastPointerViewport;
 
   final List<List<List<List<double>>>> undoStack = [];
   final List<List<List<List<double>>>> redoStack = [];
@@ -106,9 +118,11 @@ class _StudioHomeState extends State<StudioHome> {
   @override
   void initState() {
     super.initState();
+
     fuelMap = _createMap(100);
     ignitionMap = _createMap(0);
     afrMap = _createMap(14.7);
+
     _loadMaps();
     _loadSettings();
   }
@@ -121,22 +135,28 @@ class _StudioHomeState extends State<StudioHome> {
     super.dispose();
   }
 
+  // ==========================================================
+  // MAP DATA
+  // ==========================================================
+
   List<List<double>> _createMap(double value) {
     return List.generate(
-      35,
-      (_) => List.generate(51, (_) => value),
+      rpmCount,
+      (_) => List.generate(tpsCount, (_) => value),
     );
   }
 
   List<List<double>> _copyMap(List<List<double>> source) {
-    return source.map((r) => List<double>.from(r)).toList();
+    return source.map((row) => List<double>.from(row)).toList();
   }
 
-  List<List<List<double>>> _snapshot() => [
-        _copyMap(fuelMap),
-        _copyMap(ignitionMap),
-        _copyMap(afrMap),
-      ];
+  List<List<List<double>>> _snapshot() {
+    return [
+      _copyMap(fuelMap),
+      _copyMap(ignitionMap),
+      _copyMap(afrMap),
+    ];
+  }
 
   void _restoreSnapshot(List<List<List<double>>> snapshot) {
     fuelMap = _copyMap(snapshot[0]);
@@ -171,7 +191,7 @@ class _StudioHomeState extends State<StudioHome> {
       case MapType.fuel:
         return '%';
       case MapType.ignition:
-        return '°';
+        return 'DEG';
       case MapType.afr:
         return 'AFR';
     }
@@ -201,68 +221,94 @@ class _StudioHomeState extends State<StudioHome> {
 
   void _history() {
     undoStack.add(_snapshot());
-    if (undoStack.length > 30) undoStack.removeAt(0);
+
+    if (undoStack.length > 30) {
+      undoStack.removeAt(0);
+    }
+
     redoStack.clear();
   }
 
-  void _undo() {
-    if (undoStack.isEmpty) return;
-    setState(() {
-      redoStack.add(_snapshot());
-      _restoreSnapshot(undoStack.removeLast());
-      saved = false;
-    });
-  }
-
-  void _redo() {
-    if (redoStack.isEmpty) return;
-    setState(() {
-      undoStack.add(_snapshot());
-      _restoreSnapshot(redoStack.removeLast());
-      saved = false;
-    });
-  }
+  // ==========================================================
+  // SAVE / LOAD
+  // ==========================================================
 
   Future<void> _saveMaps() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('fuel_map_v2', jsonEncode(fuelMap));
+
     await prefs.setString(
-        'ignition_map_v2', jsonEncode(ignitionMap));
-    await prefs.setString('afr_map_v1', jsonEncode(afrMap));
+      'fuel_map_v2',
+      jsonEncode(fuelMap),
+    );
+
+    await prefs.setString(
+      'ignition_map_v2',
+      jsonEncode(ignitionMap),
+    );
+
+    await prefs.setString(
+      'afr_map_v1',
+      jsonEncode(afrMap),
+    );
 
     if (!mounted) return;
+
     setState(() => saved = true);
+
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('บันทึกแผนที่เรียบร้อย')),
+      const SnackBar(
+        content: Text('บันทึกแผนที่เรียบร้อย'),
+      ),
     );
   }
 
   Future<void> _loadMaps() async {
     final prefs = await SharedPreferences.getInstance();
 
-    List<List<double>> readMap(String key, double fallback) {
+    List<List<double>> readMap(
+      String key,
+      double fallback,
+    ) {
       final raw = prefs.getString(key);
-      if (raw == null) return _createMap(fallback);
+
+      if (raw == null) {
+        return _createMap(fallback);
+      }
 
       try {
         final decoded = jsonDecode(raw) as List;
-        if (decoded.length != 35) return _createMap(fallback);
 
-        return decoded.map<List<double>>((row) {
+        if (decoded.isEmpty || decoded.length > rpmCount) {
+          return _createMap(fallback);
+        }
+
+        final result = decoded.map<List<double>>((row) {
           final values = (row as List)
               .map((v) => (v as num).toDouble())
               .toList();
-          if (values.length != 51) {
+
+          if (values.length != tpsCount) {
             throw const FormatException('Invalid map size');
           }
+
           return values;
         }).toList();
+
+        // Preserve old maps and extend to 55 RPM rows.
+        final lastRow = List<double>.from(result.last);
+
+        while (result.length < rpmCount) {
+          result.add(List<double>.from(lastRow));
+        }
+
+        return result;
       } catch (_) {
         return _createMap(fallback);
       }
     }
 
     if (!mounted) return;
+
     setState(() {
       fuelMap = readMap('fuel_map_v2', 100);
       ignitionMap = readMap('ignition_map_v2', 0);
@@ -277,13 +323,17 @@ class _StudioHomeState extends State<StudioHome> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    final mode = prefs.getString('orientation_mode') ?? 'Auto Rotate';
-    final savedZoom = prefs.getDouble('map_zoom') ?? 1.0;
+
+    final mode =
+        prefs.getString('orientation_mode') ?? 'Landscape';
+
+    final savedZoom = prefs.getDouble('map_zoom') ?? 0.85;
 
     if (!mounted) return;
+
     setState(() {
       orientationMode = mode;
-      zoom = savedZoom.clamp(0.65, 1.5).toDouble();
+      zoom = savedZoom.clamp(0.55, 1.5).toDouble();
     });
 
     await _applyOrientation(mode);
@@ -291,10 +341,15 @@ class _StudioHomeState extends State<StudioHome> {
 
   Future<void> _saveOrientation(String mode) async {
     final prefs = await SharedPreferences.getInstance();
+
     await prefs.setString('orientation_mode', mode);
+
     if (!mounted) return;
 
-    setState(() => orientationMode = mode);
+    setState(() {
+      orientationMode = mode;
+    });
+
     await _applyOrientation(mode);
   }
 
@@ -320,9 +375,34 @@ class _StudioHomeState extends State<StudioHome> {
 
   void _changeZoom(double amount) {
     setState(() {
-      zoom = (zoom + amount).clamp(0.65, 1.5).toDouble();
+      zoom = (zoom + amount).clamp(0.55, 1.5).toDouble();
     });
+
     _saveZoom();
+  }
+
+  // ==========================================================
+  // UNDO / REDO
+  // ==========================================================
+
+  void _undo() {
+    if (undoStack.isEmpty) return;
+
+    setState(() {
+      redoStack.add(_snapshot());
+      _restoreSnapshot(undoStack.removeLast());
+      saved = false;
+    });
+  }
+
+  void _redo() {
+    if (redoStack.isEmpty) return;
+
+    setState(() {
+      undoStack.add(_snapshot());
+      _restoreSnapshot(redoStack.removeLast());
+      saved = false;
+    });
   }
 
   // ==========================================================
@@ -331,63 +411,73 @@ class _StudioHomeState extends State<StudioHome> {
 
   Future<void> _editCell(int row, int col) async {
     final data = _map(activeMap);
+
     final controller = TextEditingController(
       text: data[row][col].toStringAsFixed(2),
     );
 
     final result = await showDialog<double>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: panel,
-        title: Text(
-          'แก้ไข ${_mapName(activeMap)}',
-          style: const TextStyle(color: cyan),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('RPM: ${rpmAxis[row]}'),
-            Text('TPS: ${tpsAxis[col]}%'),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              autofocus: true,
-              keyboardType:
-                  const TextInputType.numberWithOptions(
-                decimal: true,
-                signed: true,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: panel,
+          title: Text(
+            'EDIT ${_mapName(activeMap)}',
+            style: const TextStyle(color: cyan),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('RPM: ${rpmAxis[row]}'),
+              Text('TPS: ${tpsAxis[col]}%'),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType:
+                    const TextInputType.numberWithOptions(
+                  decimal: true,
+                  signed: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: 'New value (${_mapUnit(activeMap)})',
+                  border: const OutlineInputBorder(),
+                ),
               ),
-              decoration: InputDecoration(
-                labelText: 'ค่าใหม่ (${_mapUnit(activeMap)})',
-                border: const OutlineInputBorder(),
-              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('CANCEL'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = double.tryParse(controller.text);
+
+                if (value != null && value.isFinite) {
+                  Navigator.pop(dialogContext, value);
+                }
+              },
+              child: const Text('SAVE'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('ยกเลิก'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final value = double.tryParse(controller.text);
-              if (value != null) Navigator.pop(context, value);
-            },
-            child: const Text('บันทึก'),
-          ),
-        ],
-      ),
+        );
+      },
     );
 
+    controller.dispose();
+
     if (result == null) return;
+
     _history();
 
     setState(() {
       data[row][col] = result
           .clamp(_minimum(activeMap), _maximum(activeMap))
           .toDouble();
+
       saved = false;
     });
   }
@@ -406,8 +496,10 @@ class _StudioHomeState extends State<StudioHome> {
 
     final rows =
         (selectionEndRow! - selectionStartRow!).abs() + 1;
+
     final cols =
         (selectionEndCol! - selectionStartCol!).abs() + 1;
+
     return rows * cols;
   }
 
@@ -425,6 +517,7 @@ class _StudioHomeState extends State<StudioHome> {
 
   bool _isSelected(int row, int col) {
     if (selectedCellCount == 0) return false;
+
     return row >= minSelectedRow &&
         row <= maxSelectedRow &&
         col >= minSelectedCol &&
@@ -441,18 +534,17 @@ class _StudioHomeState extends State<StudioHome> {
   }
 
   void _clearSelection() {
-    setState(() {
-      selectionStartRow = null;
-      selectionStartCol = null;
-      selectionEndRow = null;
-      selectionEndCol = null;
-    });
+    selectionStartRow = null;
+    selectionStartCol = null;
+    selectionEndRow = null;
+    selectionEndCol = null;
   }
 
   double _selectionAverage() {
     if (selectedCellCount == 0) return 0;
 
     final data = _map(activeMap);
+
     double total = 0;
     int count = 0;
 
@@ -462,66 +554,103 @@ class _StudioHomeState extends State<StudioHome> {
         count++;
       }
     }
+
     return count == 0 ? 0 : total / count;
+  }
+
+  int? _cellRowFromGlobal(Offset globalPosition) {
+    final box = mapContentKey.currentContext?.findRenderObject()
+        as RenderBox?;
+
+    if (box == null || !box.hasSize) return null;
+
+    final p = box.globalToLocal(globalPosition);
+
+    final rpmWidth = 64.0 * zoom;
+    final headerHeight = 28.0 * zoom;
+    final rowHeight = 25.0 * zoom;
+    final cellWidth = 42.0 * zoom;
+
+    if (p.dx < rpmWidth || p.dy < headerHeight) {
+      return null;
+    }
+
+    final col = ((p.dx - rpmWidth) / cellWidth)
+        .floor()
+        .clamp(0, tpsCount - 1)
+        .toInt();
+
+    final row = ((p.dy - headerHeight) / rowHeight)
+        .floor()
+        .clamp(0, rpmCount - 1)
+        .toInt();
+
+    return row * tpsCount + col;
   }
 
   void _selectFromGlobal(Offset globalPosition) {
     final box = mapContentKey.currentContext?.findRenderObject()
         as RenderBox?;
+
     if (box == null || !box.hasSize) return;
 
     final p = box.globalToLocal(globalPosition);
 
-    final rpmWidth = 78.0 * zoom;
-    final cellWidth = 48.0 * zoom;
-    final headerHeight = 34.0 * zoom;
-    final rowHeight = 31.0 * zoom;
+    final rpmWidth = 64.0 * zoom;
+    final cellWidth = 42.0 * zoom;
+    final headerHeight = 28.0 * zoom;
+    final rowHeight = 25.0 * zoom;
 
     if (p.dx < rpmWidth || p.dy < headerHeight) return;
 
     final col = ((p.dx - rpmWidth) / cellWidth)
         .floor()
-        .clamp(0, 50)
+        .clamp(0, tpsCount - 1)
         .toInt();
 
     final row = ((p.dy - headerHeight) / rowHeight)
         .floor()
-        .clamp(0, 34)
+        .clamp(0, rpmCount - 1)
         .toInt();
 
-    if (selectionStartRow == null) {
-      _selectCell(row, col);
-    } else {
-      setState(() {
-        selectionEndRow = row;
-        selectionEndCol = col;
-      });
-    }
+    setState(() {
+      selectionEndRow = row;
+      selectionEndCol = col;
+    });
   }
 
   void _startSelectionPointer(PointerEvent event) {
     if (!rangeSelectMode) return;
 
     lastPointerGlobal = event.position;
-    lastPointerLocal = event.localPosition;
+
+    final viewport = mapViewportKey.currentContext
+        ?.findRenderObject() as RenderBox?;
+
+    if (viewport != null && viewport.hasSize) {
+      lastPointerViewport = viewport.globalToLocal(event.position);
+    }
 
     final box = mapContentKey.currentContext?.findRenderObject()
         as RenderBox?;
-    if (box == null) return;
+
+    if (box == null || !box.hasSize) return;
 
     final p = box.globalToLocal(event.position);
-    final rpmWidth = 78.0 * zoom;
-    final headerHeight = 34.0 * zoom;
+
+    final rpmWidth = 64.0 * zoom;
+    final headerHeight = 28.0 * zoom;
 
     if (p.dx < rpmWidth || p.dy < headerHeight) return;
 
-    final col = ((p.dx - rpmWidth) / (48.0 * zoom))
+    final col = ((p.dx - rpmWidth) / (42.0 * zoom))
         .floor()
-        .clamp(0, 50)
+        .clamp(0, tpsCount - 1)
         .toInt();
-    final row = ((p.dy - headerHeight) / (31.0 * zoom))
+
+    final row = ((p.dy - headerHeight) / (25.0 * zoom))
         .floor()
-        .clamp(0, 34)
+        .clamp(0, rpmCount - 1)
         .toInt();
 
     _selectCell(row, col);
@@ -530,18 +659,25 @@ class _StudioHomeState extends State<StudioHome> {
 
   void _moveSelectionPointer(PointerEvent event) {
     if (!rangeSelectMode || selectionStartRow == null) return;
+
     lastPointerGlobal = event.position;
-    lastPointerLocal = event.localPosition;
+
+    final viewport = mapViewportKey.currentContext
+        ?.findRenderObject() as RenderBox?;
+
+    if (viewport != null && viewport.hasSize) {
+      lastPointerViewport = viewport.globalToLocal(event.position);
+    }
+
     _selectFromGlobal(event.position);
   }
 
   void _endSelectionPointer(PointerEvent event) {
     _stopAutoScroll();
     lastPointerGlobal = null;
-    lastPointerLocal = null;
+    lastPointerViewport = null;
   }
 
-  // Auto scroll while dragging near the visible edges.
   void _startAutoScroll() {
     if (!autoScrollEnabled || autoScrollTimer != null) return;
 
@@ -550,7 +686,7 @@ class _StudioHomeState extends State<StudioHome> {
       (_) {
         if (!mounted ||
             !rangeSelectMode ||
-            lastPointerLocal == null) {
+            lastPointerViewport == null) {
           return;
         }
 
@@ -559,48 +695,56 @@ class _StudioHomeState extends State<StudioHome> {
 
         if (viewport == null || !viewport.hasSize) return;
 
-        final p = lastPointerLocal!;
+        final p = lastPointerViewport!;
         final width = viewport.size.width;
         final height = viewport.size.height;
 
-        const edge = 45.0;
-        const step = 28.0;
+        const edge = 38.0;
+        const step = 24.0;
 
         if (p.dx < edge && mapHorizontalController.hasClients) {
-          final next = (mapHorizontalController.offset - step)
-              .clamp(
-                0.0,
-                mapHorizontalController.position.maxScrollExtent,
-              )
-              .toDouble();
+          final next =
+              (mapHorizontalController.offset - step)
+                  .clamp(
+                    0.0,
+                    mapHorizontalController.position.maxScrollExtent,
+                  )
+                  .toDouble();
+
           mapHorizontalController.jumpTo(next);
         } else if (p.dx > width - edge &&
             mapHorizontalController.hasClients) {
-          final next = (mapHorizontalController.offset + step)
-              .clamp(
-                0.0,
-                mapHorizontalController.position.maxScrollExtent,
-              )
-              .toDouble();
+          final next =
+              (mapHorizontalController.offset + step)
+                  .clamp(
+                    0.0,
+                    mapHorizontalController.position.maxScrollExtent,
+                  )
+                  .toDouble();
+
           mapHorizontalController.jumpTo(next);
         }
 
         if (p.dy < edge && mapVerticalController.hasClients) {
-          final next = (mapVerticalController.offset - step)
-              .clamp(
-                0.0,
-                mapVerticalController.position.maxScrollExtent,
-              )
-              .toDouble();
+          final next =
+              (mapVerticalController.offset - step)
+                  .clamp(
+                    0.0,
+                    mapVerticalController.position.maxScrollExtent,
+                  )
+                  .toDouble();
+
           mapVerticalController.jumpTo(next);
         } else if (p.dy > height - edge &&
             mapVerticalController.hasClients) {
-          final next = (mapVerticalController.offset + step)
-              .clamp(
-                0.0,
-                mapVerticalController.position.maxScrollExtent,
-              )
-              .toDouble();
+          final next =
+              (mapVerticalController.offset + step)
+                  .clamp(
+                    0.0,
+                    mapVerticalController.position.maxScrollExtent,
+                  )
+                  .toDouble();
+
           mapVerticalController.jumpTo(next);
         }
 
@@ -616,10 +760,16 @@ class _StudioHomeState extends State<StudioHome> {
     autoScrollTimer = null;
   }
 
+  // ==========================================================
+  // RANGE OPERATIONS
+  // ==========================================================
+
   void _applyAverage() {
     if (selectedCellCount == 0) return;
+
     final average = _selectionAverage();
     final data = _map(activeMap);
+
     _history();
 
     setState(() {
@@ -628,6 +778,7 @@ class _StudioHomeState extends State<StudioHome> {
           data[r][c] = average;
         }
       }
+
       saved = false;
     });
   }
@@ -636,6 +787,7 @@ class _StudioHomeState extends State<StudioHome> {
     if (selectedCellCount < 2) return;
 
     final data = _map(activeMap);
+
     _history();
 
     setState(() {
@@ -663,6 +815,7 @@ class _StudioHomeState extends State<StudioHome> {
           data[r][c1] = start + (end - start) * t;
         }
       }
+
       saved = false;
     });
   }
@@ -674,46 +827,55 @@ class _StudioHomeState extends State<StudioHome> {
 
     final value = await showDialog<double>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: panel,
-        title: Text('ปรับค่า: $operation'),
-        content: TextField(
-          controller: controller,
-          keyboardType:
-              const TextInputType.numberWithOptions(
-            decimal: true,
-            signed: true,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: panel,
+          title: Text('MATH $operation'),
+          content: TextField(
+            controller: controller,
+            keyboardType:
+                const TextInputType.numberWithOptions(
+              decimal: true,
+              signed: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Enter number',
+              border: OutlineInputBorder(),
+            ),
           ),
-          decoration: const InputDecoration(
-            labelText: 'ใส่ตัวเลข',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('ยกเลิก'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final n = double.tryParse(controller.text);
-              if (n != null) Navigator.pop(context, n);
-            },
-            child: const Text('ตกลง'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('CANCEL'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final n = double.tryParse(controller.text);
+
+                if (n != null && n.isFinite) {
+                  Navigator.pop(dialogContext, n);
+                }
+              },
+              child: const Text('APPLY'),
+            ),
+          ],
+        );
+      },
     );
+
+    controller.dispose();
 
     if (value == null) return;
 
     final data = _map(activeMap);
+
     _history();
 
     setState(() {
       for (int r = minSelectedRow; r <= maxSelectedRow; r++) {
         for (int c = minSelectedCol; c <= maxSelectedCol; c++) {
           double result = data[r][c];
+
           if (operation == '+') result += value;
           if (operation == '-') result -= value;
           if (operation == '×') result *= value;
@@ -723,6 +885,7 @@ class _StudioHomeState extends State<StudioHome> {
               .toDouble();
         }
       }
+
       saved = false;
     });
   }
@@ -732,6 +895,7 @@ class _StudioHomeState extends State<StudioHome> {
 
     final data = _map(activeMap);
     final old = _copyMap(data);
+
     _history();
 
     setState(() {
@@ -755,15 +919,18 @@ class _StudioHomeState extends State<StudioHome> {
             }
           }
 
-          if (count > 0) data[r][c] = total / count;
+          if (count > 0) {
+            data[r][c] = total / count;
+          }
         }
       }
+
       saved = false;
     });
   }
 
   // ==========================================================
-  // MAIN UI
+  // MAIN LAYOUT
   // ==========================================================
 
   @override
@@ -786,93 +953,117 @@ class _StudioHomeState extends State<StudioHome> {
   }
 
   Widget _sidebar() {
-    final items = [
-      ['Dashboard', Icons.dashboard],
-      ['Fuel Map', Icons.local_gas_station],
-      ['Ignition Map', Icons.bolt],
-      ['AFR Target', Icons.speed],
-      ['Graph', Icons.show_chart],
-      ['Data Logger', Icons.analytics],
-      ['File Manager', Icons.folder],
-      ['ECU Connection', Icons.bluetooth],
-      ['Settings', Icons.settings],
+    final items = <Map<String, dynamic>>[
+      {'name': 'Dashboard', 'icon': Icons.home_rounded},
+      {'name': 'Fuel Map', 'icon': Icons.local_gas_station},
+      {'name': 'Ignition Map', 'icon': Icons.bolt},
+      {'name': 'AFR Target', 'icon': Icons.speed},
+      {'name': 'Graph', 'icon': Icons.bar_chart},
+      {'name': 'Data Logger', 'icon': Icons.monitor_heart},
+      {'name': 'File Manager', 'icon': Icons.folder},
+      {'name': 'ECU Connection', 'icon': Icons.bluetooth},
+      {'name': 'Settings', 'icon': Icons.settings},
     ];
 
     return Container(
-      width: 155,
+      width: 126,
       color: panel,
       child: Column(
         children: [
-          const SizedBox(height: 18),
-          const Icon(Icons.memory, color: blue, size: 32),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
+          const Icon(
+            Icons.memory,
+            color: blue,
+            size: 30,
+          ),
+          const SizedBox(height: 5),
           const Text(
             'FORZA',
             style: TextStyle(
               fontWeight: FontWeight.bold,
               letterSpacing: 2,
+              fontSize: 13,
               color: Colors.white,
             ),
           ),
           const Text(
             'REMAP STUDIO',
             style: TextStyle(
-              fontSize: 10,
+              fontSize: 9,
               color: cyan,
               letterSpacing: 1,
             ),
           ),
-          const SizedBox(height: 20),
-          const Divider(color: panel2),
+          const SizedBox(height: 12),
+          const Divider(color: panel2, height: 1),
           Expanded(
             child: ListView.builder(
+              padding: const EdgeInsets.only(top: 5),
               itemCount: items.length,
               itemBuilder: (context, index) {
                 final selected = page == index;
+
                 return InkWell(
                   onTap: () {
                     _stopAutoScroll();
+
                     setState(() {
                       page = index;
-                      if (index == 1) activeMap = MapType.fuel;
-                      if (index == 2) activeMap = MapType.ignition;
-                      if (index == 3) activeMap = MapType.afr;
+
+                      if (index == 1) {
+                        activeMap = MapType.fuel;
+                      }
+
+                      if (index == 2) {
+                        activeMap = MapType.ignition;
+                      }
+
+                      if (index == 3) {
+                        activeMap = MapType.afr;
+                      }
+
                       rangeSelectMode = false;
                       _clearSelection();
                     });
                   },
                   child: Container(
                     margin: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
+                      horizontal: 5,
+                      vertical: 2,
                     ),
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 12,
+                      horizontal: 7,
+                      vertical: 9,
                     ),
                     decoration: BoxDecoration(
                       color: selected
-                          ? blue.withOpacity(0.18)
+                          ? blue.withOpacity(0.20)
                           : Colors.transparent,
                       borderRadius: BorderRadius.circular(7),
                       border: selected
-                          ? Border.all(color: blue.withOpacity(0.7))
+                          ? Border.all(
+                              color: blue.withOpacity(0.8),
+                            )
                           : null,
                     ),
                     child: Row(
                       children: [
                         Icon(
-                          items[index][1] as IconData,
-                          size: 17,
+                          items[index]['icon'] as IconData,
+                          size: 16,
                           color: selected ? cyan : muted,
                         ),
-                        const SizedBox(width: 9),
+                        const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            items[index][0] as String,
+                            items[index]['name'] as String,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 11,
-                              color: selected ? Colors.white : muted,
+                              fontSize: 9,
+                              color: selected
+                                  ? Colors.white
+                                  : muted,
                               fontWeight: selected
                                   ? FontWeight.bold
                                   : FontWeight.normal,
@@ -887,11 +1078,15 @@ class _StudioHomeState extends State<StudioHome> {
             ),
           ),
           const Padding(
-            padding: EdgeInsets.all(10),
+            padding: EdgeInsets.all(8),
             child: Text(
               'LOCAL EDITOR\nNO ECU LINK',
               textAlign: TextAlign.center,
-              style: TextStyle(color: orange, fontSize: 9),
+              style: TextStyle(
+                color: orange,
+                fontSize: 8,
+                height: 1.4,
+              ),
             ),
           ),
         ],
@@ -924,9 +1119,13 @@ class _StudioHomeState extends State<StudioHome> {
     }
   }
 
+  // ==========================================================
+  // HEADER
+  // ==========================================================
+
   Widget _header(String title, String subtitle) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 15, 18, 12),
+      padding: const EdgeInsets.fromLTRB(12, 7, 12, 6),
       child: Row(
         children: [
           Expanded(
@@ -936,17 +1135,17 @@ class _StudioHomeState extends State<StudioHome> {
                 Text(
                   title,
                   style: const TextStyle(
-                    fontSize: 19,
+                    fontSize: 16,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 1,
                   ),
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
                 Text(
                   subtitle,
                   style: const TextStyle(
                     color: muted,
-                    fontSize: 10,
+                    fontSize: 9,
                   ),
                 ),
               ],
@@ -955,19 +1154,24 @@ class _StudioHomeState extends State<StudioHome> {
           Icon(
             saved ? Icons.cloud_done : Icons.edit_note,
             color: saved ? green : orange,
+            size: 19,
           ),
-          const SizedBox(width: 5),
+          const SizedBox(width: 4),
           Text(
             saved ? 'SAVED' : 'UNSAVED',
             style: TextStyle(
               color: saved ? green : orange,
-              fontSize: 10,
+              fontSize: 9,
             ),
           ),
         ],
       ),
     );
   }
+
+  // ==========================================================
+  // DASHBOARD
+  // ==========================================================
 
   Widget _dashboard() {
     return Column(
@@ -978,85 +1182,106 @@ class _StudioHomeState extends State<StudioHome> {
           'FORZA REMAP STUDIO  |  PROFESSIONAL ECU',
         ),
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                Row(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxHeight < 430;
+
+              return SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(12, 3, 12, 10),
+                child: Column(
                   children: [
-                    _statusCard(
-                      'ENGINE',
-                      'FORZA 350',
-                      Icons.motorcycle,
-                      cyan,
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 10,
+                          child: _statusCard(
+                            'ENGINE',
+                            'FORZA 350',
+                            Icons.motorcycle,
+                            cyan,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          flex: 9,
+                          child: _statusCard(
+                            'RPM CURRENT',
+                            '----',
+                            Icons.speed,
+                            blue,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          flex: 8,
+                          child: _statusCard(
+                            'TPS CURRENT',
+                            '--.- %',
+                            Icons.tune,
+                            green,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          flex: 8,
+                          child: _statusCard(
+                            'ECT',
+                            '--.- °C',
+                            Icons.thermostat,
+                            orange,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          flex: 8,
+                          child: _statusCard(
+                            'AFR',
+                            '--.-',
+                            Icons.opacity,
+                            cyan,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 10),
-                    _statusCard(
-                      'MAP SIZE',
-                      '35 × 51',
-                      Icons.grid_on,
-                      blue,
+                    SizedBox(height: compact ? 7 : 11),
+                    _dashboardRangeCard(compact),
+                    SizedBox(height: compact ? 7 : 11),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _statusCard(
+                            'FUEL MAP',
+                            '2,805 CELLS',
+                            Icons.local_gas_station,
+                            green,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          child: _statusCard(
+                            'IGNITION MAP',
+                            '2,805 CELLS',
+                            Icons.bolt,
+                            blue,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          child: _statusCard(
+                            'AFR TARGET',
+                            '2,805 CELLS',
+                            Icons.speed,
+                            cyan,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 10),
-                    _statusCard(
-                      'CELLS',
-                      '1,785',
-                      Icons.table_chart,
-                      green,
-                    ),
+                    SizedBox(height: compact ? 7 : 11),
+                    _dashboardWarning(),
                   ],
                 ),
-                const SizedBox(height: 14),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: panel,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: panel2),
-                  ),
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'MAP CONFIGURATION',
-                        style: TextStyle(
-                          color: cyan,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      SizedBox(height: 15),
-                      Text('RPM: 1,500 – 10,000 / 250 RPM'),
-                      SizedBox(height: 7),
-                      Text('TPS: 0 – 100% / 2%'),
-                      SizedBox(height: 7),
-                      Text('Fuel Map: 1,785 cells'),
-                      SizedBox(height: 7),
-                      Text('Ignition Map: 1,785 cells'),
-                      SizedBox(height: 7),
-                      Text('AFR Target Map: 1,785 cells'),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(15),
-                  decoration: BoxDecoration(
-                    color: orange.withOpacity(0.08),
-                    border: Border.all(
-                      color: orange.withOpacity(0.5),
-                    ),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Text(
-                    'คำเตือน: ค่านี้เป็นข้อมูลตัวอย่างสำหรับแก้ไขแผนที่ในแอปเท่านั้น '
-                    'ยังไม่ได้เชื่อมต่อ ECU จริง และไม่ใช่ค่าจูนที่รับรองความปลอดภัย',
-                    style: TextStyle(color: orange, fontSize: 11),
-                  ),
-                ),
-              ],
-            ),
+              );
+            },
           ),
         ),
       ],
@@ -1069,69 +1294,249 @@ class _StudioHomeState extends State<StudioHome> {
     IconData icon,
     Color color,
   ) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: panel,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: panel2),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 12),
-            Text(
-              value,
-              style: const TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.bold,
-              ),
+    return Container(
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: panel,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: panel2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(height: 7),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
             ),
-            Text(
-              title,
-              style: const TextStyle(fontSize: 9, color: muted),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 8,
+              color: muted,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _rangeButton(
-    String label,
-    IconData icon,
-    VoidCallback action,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: OutlinedButton.icon(
-        onPressed: selectedCellCount == 0 ? null : action,
-        icon: Icon(icon, size: 14),
-        label: Text(label, style: const TextStyle(fontSize: 10)),
-        style: OutlinedButton.styleFrom(
-          foregroundColor: cyan,
-          padding: const EdgeInsets.symmetric(
-            horizontal: 9,
-            vertical: 8,
+  Widget _dashboardRangeCard(bool compact) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(compact ? 10 : 13),
+      decoration: BoxDecoration(
+        color: panel,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: panel2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Text(
+                'TUNING RANGE',
+                style: TextStyle(
+                  color: cyan,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              SizedBox(width: 5),
+              Text(
+                '(DASHBOARD)',
+                style: TextStyle(
+                  color: muted,
+                  fontSize: 9,
+                ),
+              ),
+            ],
           ),
-          visualDensity: VisualDensity.compact,
+          SizedBox(height: compact ? 8 : 12),
+          Row(
+            children: [
+              Expanded(
+                child: _rangeInfo(
+                  Icons.speed,
+                  'RPM RANGE',
+                  '1,500 – 15,000 RPM',
+                ),
+              ),
+              Expanded(
+                child: _rangeInfo(
+                  Icons.tune,
+                  'TPS RANGE',
+                  '0 – 100 %',
+                ),
+              ),
+              Expanded(
+                child: _rangeInfo(
+                  Icons.grid_view,
+                  'MAP SIZE',
+                  '55 × 51',
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: compact ? 8 : 12),
+          SizedBox(
+            height: compact ? 28 : 42,
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: DashboardGraphPainter(),
+            ),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'RPM STEP: 250  |  TPS STEP: 2%',
+            style: TextStyle(
+              color: muted,
+              fontSize: 9,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _rangeInfo(
+    IconData icon,
+    String title,
+    String value,
+  ) {
+    return Row(
+      children: [
+        Icon(icon, color: cyan, size: 19),
+        const SizedBox(width: 5),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: muted,
+                  fontSize: 8,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: cyan,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _dashboardWarning() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: orange.withOpacity(0.07),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: orange.withOpacity(0.35),
+        ),
+      ),
+      child: const Text(
+        'LOCAL EDITOR / NO ECU LINK\n'
+        'RPM, TPS, ECT และ AFR ยังไม่มีข้อมูลจากเซนเซอร์จริง '
+        'จะแสดงเป็นเครื่องหมาย ---- จนกว่าจะพัฒนาระบบเชื่อมต่อ ECU',
+        style: TextStyle(
+          color: orange,
+          fontSize: 9,
+          height: 1.5,
         ),
       ),
     );
   }
 
   // ==========================================================
-  // MAP EDITOR WITH ZOOM AND AUTO SCROLL
+  // MAP TOOL BUTTONS
+  // ==========================================================
+
+  Widget _smallToolButton(
+    String label,
+    IconData icon,
+    VoidCallback? action, {
+    Color color = cyan,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: OutlinedButton.icon(
+        onPressed: action,
+        icon: Icon(icon, size: 13),
+        label: Text(
+          label,
+          style: const TextStyle(fontSize: 9),
+        ),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: color,
+          padding: const EdgeInsets.symmetric(
+            horizontal: 7,
+            vertical: 7,
+          ),
+          minimumSize: const Size(0, 30),
+          visualDensity: VisualDensity.compact,
+          side: BorderSide(
+            color: color.withOpacity(0.5),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _iconTool(
+    String tooltip,
+    IconData icon,
+    VoidCallback? action, {
+    Color color = muted,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: action,
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints(
+        minWidth: 31,
+        minHeight: 31,
+      ),
+      padding: EdgeInsets.zero,
+      icon: Icon(icon, size: 19, color: color),
+    );
+  }
+
+  // ==========================================================
+  // MAP EDITOR
   // ==========================================================
 
   Widget _mapEditor() {
     final data = _map(activeMap);
-    final rpmWidth = 78.0 * zoom;
-    final cellWidth = 48.0 * zoom;
-    final headerHeight = 34.0 * zoom;
-    final rowHeight = 31.0 * zoom;
+
+    final rpmWidth = 64.0 * zoom;
+    final cellWidth = 42.0 * zoom;
+    final headerHeight = 28.0 * zoom;
+    final rowHeight = 25.0 * zoom;
+
     final canSelectRange = activeMap != MapType.afr;
 
     return Column(
@@ -1139,13 +1544,12 @@ class _StudioHomeState extends State<StudioHome> {
       children: [
         _header(
           _mapName(activeMap),
-          '35 RPM POINTS × 51 TPS POINTS',
+          '55 RPM POINTS × 51 TPS POINTS',
         ),
 
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Wrap(
-            spacing: 7,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
             children: [
               _mapChip('FUEL', MapType.fuel),
               _mapChip('IGNITION', MapType.ignition),
@@ -1154,46 +1558,48 @@ class _StudioHomeState extends State<StudioHome> {
           ),
         ),
 
-        const SizedBox(height: 5),
+        const SizedBox(height: 2),
 
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 7),
           child: Row(
             children: [
-              FilterChip(
-                label: Text(
-                  rangeSelectMode ? 'RANGE ON' : 'RANGE SELECT',
-                  style: const TextStyle(fontSize: 10),
-                ),
-                selected: rangeSelectMode,
-                selectedColor: blue.withOpacity(0.3),
-                onSelected: canSelectRange
-                    ? (value) {
+              _smallToolButton(
+                rangeSelectMode ? 'RANGE ON' : 'RANGE SELECT',
+                Icons.select_all,
+                canSelectRange
+                    ? () {
                         _stopAutoScroll();
+
                         setState(() {
-                          rangeSelectMode = value;
+                          rangeSelectMode = !rangeSelectMode;
                           _clearSelection();
                         });
                       }
                     : null,
+                color: rangeSelectMode ? blue : cyan,
               ),
-              const SizedBox(width: 6),
+
               if (rangeSelectMode) ...[
-                _rangeButton(
+                _smallToolButton(
                   'AVERAGE',
                   Icons.functions,
-                  _applyAverage,
+                  selectedCellCount > 0 ? _applyAverage : null,
                 ),
-                _rangeButton(
+                _smallToolButton(
                   'INTERPOLATE',
                   Icons.linear_scale,
-                  _applyRangeInterpolation,
+                  selectedCellCount > 1
+                      ? _applyRangeInterpolation
+                      : null,
                 ),
-                _rangeButton(
+                _smallToolButton(
                   'SMOOTH',
                   Icons.blur_on,
-                  _smoothSelection,
+                  selectedCellCount > 0
+                      ? _smoothSelection
+                      : null,
                 ),
                 PopupMenuButton<String>(
                   tooltip: 'Math',
@@ -1214,60 +1620,76 @@ class _StudioHomeState extends State<StudioHome> {
                     ),
                   ],
                   child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 8),
+                    padding: EdgeInsets.symmetric(horizontal: 6),
                     child: Row(
                       children: [
-                        Icon(Icons.calculate, color: cyan, size: 18),
-                        SizedBox(width: 4),
-                        Text('MATH'),
+                        Icon(
+                          Icons.calculate,
+                          color: cyan,
+                          size: 18,
+                        ),
+                        SizedBox(width: 3),
+                        Text(
+                          'MATH',
+                          style: TextStyle(fontSize: 9),
+                        ),
                       ],
                     ),
                   ),
                 ),
-                TextButton(
-                  onPressed: _clearSelection,
-                  child: const Text('CLEAR'),
+                _iconTool(
+                  'Clear selection',
+                  Icons.clear,
+                  _clearSelection,
                 ),
               ],
-              IconButton(
-                tooltip: 'Zoom out',
-                onPressed: () => _changeZoom(-0.1),
-                icon: const Icon(Icons.zoom_out),
+
+              _iconTool(
+                'Zoom out',
+                Icons.zoom_out,
+                () => _changeZoom(-0.1),
               ),
+
               Text(
                 '${(zoom * 100).round()}%',
                 style: const TextStyle(
                   color: cyan,
-                  fontSize: 10,
+                  fontSize: 9,
                 ),
               ),
-              IconButton(
-                tooltip: 'Zoom in',
-                onPressed: () => _changeZoom(0.1),
-                icon: const Icon(Icons.zoom_in),
+
+              _iconTool(
+                'Zoom in',
+                Icons.zoom_in,
+                () => _changeZoom(0.1),
               ),
-              IconButton(
-                tooltip: 'Reset zoom',
-                onPressed: () {
-                  setState(() => zoom = 1.0);
+
+              _iconTool(
+                'Reset zoom',
+                Icons.fit_screen,
+                () {
+                  setState(() => zoom = 0.85);
                   _saveZoom();
                 },
-                icon: const Icon(Icons.fit_screen),
               ),
-              IconButton(
-                tooltip: 'Undo',
-                onPressed: undoStack.isEmpty ? null : _undo,
-                icon: const Icon(Icons.undo),
+
+              _iconTool(
+                'Undo',
+                Icons.undo,
+                undoStack.isEmpty ? null : _undo,
               ),
-              IconButton(
-                tooltip: 'Redo',
-                onPressed: redoStack.isEmpty ? null : _redo,
-                icon: const Icon(Icons.redo),
+
+              _iconTool(
+                'Redo',
+                Icons.redo,
+                redoStack.isEmpty ? null : _redo,
               ),
-              IconButton(
-                tooltip: 'Save',
-                onPressed: _saveMaps,
-                icon: const Icon(Icons.save, color: green),
+
+              _iconTool(
+                'Save maps',
+                Icons.save,
+                _saveMaps,
+                color: green,
               ),
             ],
           ),
@@ -1275,46 +1697,58 @@ class _StudioHomeState extends State<StudioHome> {
 
         if (rangeSelectMode)
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 2, 14, 7),
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 3),
             child: Row(
               children: [
                 Expanded(
                   child: Text(
-                    'เลือกแล้ว $selectedCellCount ช่อง'
-                    '${selectedCellCount > 0 ? '  |  เฉลี่ย ${_selectionAverage().toStringAsFixed(2)}' : ''}',
+                    'SELECTED: $selectedCellCount'
+                    '${selectedCellCount > 0 ? '  |  AVG: ${_selectionAverage().toStringAsFixed(2)}' : ''}',
                     style: const TextStyle(
                       color: cyan,
-                      fontSize: 11,
+                      fontSize: 9,
                     ),
                   ),
                 ),
                 const Text(
                   'AUTO SCROLL',
-                  style: TextStyle(color: muted, fontSize: 9),
+                  style: TextStyle(
+                    color: muted,
+                    fontSize: 8,
+                  ),
                 ),
-                Switch(
-                  value: autoScrollEnabled,
-                  onChanged: (v) {
-                    setState(() => autoScrollEnabled = v);
-                    if (!v) _stopAutoScroll();
-                  },
+                Transform.scale(
+                  scale: 0.75,
+                  child: Switch(
+                    value: autoScrollEnabled,
+                    onChanged: (value) {
+                      setState(() {
+                        autoScrollEnabled = value;
+                      });
+
+                      if (!value) _stopAutoScroll();
+                    },
+                  ),
                 ),
               ],
             ),
           )
         else
           const Padding(
-            padding: EdgeInsets.fromLTRB(14, 2, 14, 7),
+            padding: EdgeInsets.fromLTRB(10, 0, 10, 3),
             child: Text(
-              'ดับเบิลแทปที่ช่องเพื่อแก้ไขค่า | ใช้ปุ่ม + / − เพื่อซูม',
-              style: TextStyle(color: muted, fontSize: 10),
+              'DOUBLE TAP CELL TO EDIT  |  ZOOM + / -',
+              style: TextStyle(
+                color: muted,
+                fontSize: 8,
+              ),
             ),
           ),
 
         Expanded(
           child: Container(
             key: mapViewportKey,
-            margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            margin: const EdgeInsets.fromLTRB(6, 0, 6, 5),
             decoration: BoxDecoration(
               color: panel,
               borderRadius: BorderRadius.circular(8),
@@ -1348,12 +1782,12 @@ class _StudioHomeState extends State<StudioHome> {
                               'RPM / TPS',
                               style: TextStyle(
                                 color: cyan,
-                                fontSize: 10 * zoom,
+                                fontSize: 8 * zoom,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
                           ),
-                          ...List.generate(51, (col) {
+                          ...List.generate(tpsCount, (col) {
                             return Container(
                               width: cellWidth,
                               height: headerHeight,
@@ -1371,14 +1805,15 @@ class _StudioHomeState extends State<StudioHome> {
                                 '${tpsAxis[col]}',
                                 style: TextStyle(
                                   color: muted,
-                                  fontSize: 9 * zoom,
+                                  fontSize: 8 * zoom,
                                 ),
                               ),
                             );
                           }),
                         ],
                       ),
-                      ...List.generate(35, (row) {
+
+                      ...List.generate(rpmCount, (row) {
                         return Row(
                           children: [
                             Container(
@@ -1402,12 +1837,15 @@ class _StudioHomeState extends State<StudioHome> {
                                 '${rpmAxis[row]}',
                                 style: TextStyle(
                                   color: cyan,
-                                  fontSize: 9 * zoom,
+                                  fontSize: 8 * zoom,
+                                  fontWeight: FontWeight.w600,
                                 ),
                               ),
                             ),
-                            ...List.generate(51, (col) {
+
+                            ...List.generate(tpsCount, (col) {
                               final selected = _isSelected(row, col);
+
                               return GestureDetector(
                                 behavior: HitTestBehavior.opaque,
                                 onDoubleTap: rangeSelectMode
@@ -1419,11 +1857,11 @@ class _StudioHomeState extends State<StudioHome> {
                                   alignment: Alignment.center,
                                   decoration: BoxDecoration(
                                     color: selected
-                                        ? blue.withOpacity(0.48)
+                                        ? blue.withOpacity(0.55)
                                         : _cellColor(data[row][col]),
                                     border: Border.all(
                                       color: selected ? cyan : bg,
-                                      width: selected ? 1.5 : 0.5,
+                                      width: selected ? 1.2 : 0.5,
                                     ),
                                   ),
                                   child: Text(
@@ -1432,7 +1870,7 @@ class _StudioHomeState extends State<StudioHome> {
                                       color: selected
                                           ? Colors.white
                                           : Colors.white70,
-                                      fontSize: 9 * zoom,
+                                      fontSize: 7.5 * zoom,
                                       fontWeight: selected
                                           ? FontWeight.bold
                                           : FontWeight.normal,
@@ -1453,17 +1891,23 @@ class _StudioHomeState extends State<StudioHome> {
         ),
 
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          padding: const EdgeInsets.fromLTRB(9, 0, 9, 5),
           child: Row(
             children: [
               Text(
                 '${_mapName(activeMap)}  |  ${_mapUnit(activeMap)}',
-                style: const TextStyle(color: muted, fontSize: 9),
+                style: const TextStyle(
+                  color: muted,
+                  fontSize: 8,
+                ),
               ),
               const Spacer(),
-              const Text(
-                'DOUBLE TAP = EDIT',
-                style: TextStyle(color: muted, fontSize: 9),
+              Text(
+                'RPM 1,500–15,000',
+                style: const TextStyle(
+                  color: muted,
+                  fontSize: 8,
+                ),
               ),
             ],
           ),
@@ -1474,29 +1918,44 @@ class _StudioHomeState extends State<StudioHome> {
 
   Widget _mapChip(String label, MapType type) {
     final selected = activeMap == type;
-    return ChoiceChip(
-      label: Text(label, style: const TextStyle(fontSize: 10)),
-      selected: selected,
-      selectedColor: blue.withOpacity(0.3),
-      onSelected: (_) {
-        setState(() {
-          activeMap = type;
-          _clearSelection();
-          if (type == MapType.afr) rangeSelectMode = false;
-        });
-      },
+
+    return Padding(
+      padding: const EdgeInsets.only(right: 5),
+      child: ChoiceChip(
+        label: Text(
+          label,
+          style: const TextStyle(fontSize: 9),
+        ),
+        selected: selected,
+        selectedColor: blue.withOpacity(0.35),
+        backgroundColor: panel,
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 5),
+        onSelected: (_) {
+          setState(() {
+            activeMap = type;
+            _clearSelection();
+
+            if (type == MapType.afr) {
+              rangeSelectMode = false;
+            }
+          });
+        },
+      ),
     );
   }
 
   Color _cellColor(double value) {
     if (activeMap == MapType.afr) {
-      if (value < 12) return red.withOpacity(0.3);
+      if (value < 12) return red.withOpacity(0.30);
       if (value < 14) return orange.withOpacity(0.25);
-      return green.withOpacity(0.2);
+      return green.withOpacity(0.20);
     }
+
     if (value < 30) return red.withOpacity(0.25);
     if (value < 80) return orange.withOpacity(0.22);
-    if (value < 140) return green.withOpacity(0.2);
+    if (value < 140) return green.withOpacity(0.20);
+
     return blue.withOpacity(0.25);
   }
 
@@ -1510,11 +1969,14 @@ class _StudioHomeState extends State<StudioHome> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _header('GRAPH', 'LIVE VIEW OF SELECTED LOCAL MAP'),
+        _header(
+          'GRAPH',
+          'LOCAL MAP VISUALIZATION',
+        ),
+
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          child: Wrap(
-            spacing: 8,
+          padding: const EdgeInsets.symmetric(horizontal: 9),
+          child: Row(
             children: [
               _mapChip('FUEL', MapType.fuel),
               _mapChip('IGNITION', MapType.ignition),
@@ -1522,36 +1984,51 @@ class _StudioHomeState extends State<StudioHome> {
             ],
           ),
         ),
-        const SizedBox(height: 8),
+
+        const SizedBox(height: 5),
+
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
           child: SegmentedButton<GraphMode>(
+            style: const ButtonStyle(
+              visualDensity: VisualDensity.compact,
+            ),
             segments: const [
               ButtonSegment(
                 value: GraphMode.twoD,
-                label: Text('2D GRAPH'),
-                icon: Icon(Icons.show_chart),
+                label: Text(
+                  '2D GRAPH',
+                  style: TextStyle(fontSize: 10),
+                ),
+                icon: Icon(Icons.show_chart, size: 16),
               ),
               ButtonSegment(
                 value: GraphMode.threeD,
-                label: Text('3D SURFACE'),
-                icon: Icon(Icons.view_in_ar),
+                label: Text(
+                  '3D SURFACE',
+                  style: TextStyle(fontSize: 10),
+                ),
+                icon: Icon(Icons.view_in_ar, size: 16),
               ),
             ],
             selected: {graphMode},
             onSelectionChanged: (selection) {
-              setState(() => graphMode = selection.first);
+              setState(() {
+                graphMode = selection.first;
+              });
             },
           ),
         ),
-        const SizedBox(height: 8),
+
+        const SizedBox(height: 5),
+
         Expanded(
           child: Container(
-            margin: const EdgeInsets.all(12),
-            padding: const EdgeInsets.all(10),
+            margin: const EdgeInsets.all(8),
+            padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: panel,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(9),
               border: Border.all(color: panel2),
             ),
             child: Column(
@@ -1560,20 +2037,27 @@ class _StudioHomeState extends State<StudioHome> {
                   children: [
                     Expanded(
                       child: Text(
-                        '${_mapName(activeMap)}  (${_mapUnit(activeMap)})',
+                        '${_mapName(activeMap)} (${_mapUnit(activeMap)})',
                         style: const TextStyle(
                           color: cyan,
                           fontWeight: FontWeight.bold,
+                          fontSize: 11,
                         ),
                       ),
                     ),
                     if (graphMode == GraphMode.threeD)
                       IconButton(
-                        tooltip: 'หมุนกราฟ',
+                        tooltip: 'Rotate graph',
+                        visualDensity: VisualDensity.compact,
                         onPressed: () {
-                          setState(() => graphRotation += 0.15);
+                          setState(() {
+                            graphRotation += 0.15;
+                          });
                         },
-                        icon: const Icon(Icons.rotate_right),
+                        icon: const Icon(
+                          Icons.rotate_right,
+                          size: 20,
+                        ),
                       ),
                   ],
                 ),
@@ -1591,14 +2075,11 @@ class _StudioHomeState extends State<StudioHome> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  graphMode == GraphMode.twoD
-                      ? 'กราฟ 2D: แสดงค่าเฉลี่ยตามรอบเครื่องยนต์'
-                      : 'กราฟ 3D: แสดงพื้นผิวของ Map ที่เลือก',
-                  style: const TextStyle(
+                const Text(
+                  'RPM RANGE: 1,500 – 15,000',
+                  style: TextStyle(
                     color: muted,
-                    fontSize: 10,
+                    fontSize: 9,
                   ),
                 ),
               ],
@@ -1617,45 +2098,34 @@ class _StudioHomeState extends State<StudioHome> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _header('SETTINGS', 'APPLICATION CONFIGURATION'),
+        _header(
+          'SETTINGS',
+          'APPLICATION CONFIGURATION',
+        ),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(12),
             children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: panel,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: panel2),
-                ),
+              _settingsCard(
+                title: 'SCREEN ORIENTATION',
+                icon: Icons.screen_rotation,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.screen_rotation, color: cyan),
-                        SizedBox(width: 10),
-                        Text(
-                          'SCREEN ORIENTATION',
-                          style: TextStyle(
-                            color: cyan,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 15),
                     const Text(
                       'เลือกรูปแบบการหมุนหน้าจอ',
-                      style: TextStyle(color: muted, fontSize: 12),
+                      style: TextStyle(
+                        color: muted,
+                        fontSize: 11,
+                      ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 8),
                     DropdownButtonFormField<String>(
                       value: orientationMode,
                       decoration: const InputDecoration(
                         border: OutlineInputBorder(),
                         labelText: 'Orientation',
+                        isDense: true,
                       ),
                       items: const [
                         DropdownMenuItem(
@@ -1677,126 +2147,123 @@ class _StudioHomeState extends State<StudioHome> {
                         }
                       },
                     ),
-                    const SizedBox(height: 10),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 10),
+
+              _settingsCard(
+                title: 'MAP ZOOM',
+                icon: Icons.zoom_in,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      'ค่าปัจจุบัน: $orientationMode',
+                      'ขนาดตาราง ${(zoom * 100).round()}%',
                       style: const TextStyle(
-                        color: green,
+                        color: muted,
                         fontSize: 11,
                       ),
                     ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: panel,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: panel2),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.zoom_in, color: cyan),
-                        SizedBox(width: 10),
-                        Text(
-                          'MAP ZOOM',
-                          style: TextStyle(
-                            color: cyan,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 15),
-                    Text(
-                      'ขนาดตาราง ${(zoom * 100).round()}%',
-                      style: const TextStyle(color: muted),
-                    ),
                     Slider(
                       value: zoom,
-                      min: 0.65,
+                      min: 0.55,
                       max: 1.5,
-                      divisions: 17,
+                      divisions: 19,
                       label: '${(zoom * 100).round()}%',
                       onChanged: (value) {
-                        setState(() => zoom = value);
+                        setState(() {
+                          zoom = value;
+                        });
                       },
                       onChangeEnd: (_) => _saveZoom(),
                     ),
-                    Row(
-                      children: [
-                        TextButton(
-                          onPressed: () {
-                            setState(() => zoom = 1.0);
-                            _saveZoom();
-                          },
-                          child: const Text('RESET ZOOM'),
-                        ),
-                      ],
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          zoom = 0.85;
+                        });
+                        _saveZoom();
+                      },
+                      child: const Text('RESET ZOOM'),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: panel,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: panel2),
+
+              const SizedBox(height: 10),
+
+              _settingsCard(
+                title: 'MAP EDITOR',
+                icon: Icons.grid_on,
+                child: SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'Auto Scroll while selecting',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  subtitle: const Text(
+                    'เลื่อนตารางอัตโนมัติเมื่อลากเลือกใกล้ขอบ',
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: muted,
+                    ),
+                  ),
+                  value: autoScrollEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      autoScrollEnabled = value;
+                    });
+
+                    if (!value) _stopAutoScroll();
+                  },
                 ),
-                child: Column(
+              ),
+
+              const SizedBox(height: 10),
+
+              _settingsCard(
+                title: 'ENGINE MAP CONFIGURATION',
+                icon: Icons.memory,
+                child: const Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'MAP EDITOR',
-                      style: TextStyle(
-                        color: cyan,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Auto Scroll while selecting',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      subtitle: const Text(
-                        'เลื่อนตารางอัตโนมัติเมื่อลากเลือกใกล้ขอบ',
-                        style: TextStyle(fontSize: 10, color: muted),
-                      ),
-                      value: autoScrollEnabled,
-                      onChanged: (value) {
-                        setState(() => autoScrollEnabled = value);
-                        if (!value) _stopAutoScroll();
-                      },
-                    ),
+                    Text('RPM: 1,500 – 15,000'),
+                    SizedBox(height: 5),
+                    Text('RPM STEP: 250'),
+                    SizedBox(height: 5),
+                    Text('RPM POINTS: 55'),
+                    SizedBox(height: 5),
+                    Text('TPS: 0 – 100%'),
+                    SizedBox(height: 5),
+                    Text('TPS STEP: 2%'),
+                    SizedBox(height: 5),
+                    Text('TPS POINTS: 51'),
+                    SizedBox(height: 5),
+                    Text('MAP SIZE: 2,805 CELLS / MAP'),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+
+              const SizedBox(height: 10),
+
               Container(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: orange.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(8),
                   border: Border.all(
                     color: orange.withOpacity(0.4),
                   ),
                 ),
                 child: const Text(
-                  'หมายเหตุ: แอปในเวอร์ชันนี้เป็น Local Map Editor '
-                  'ยังไม่มีระบบสื่อสารกับ ECU จริง การแสดงกราฟใช้ข้อมูลใน Map '
-                  'ที่จัดเก็บอยู่ภายในแอปเท่านั้น',
+                  'หมายเหตุ: แอปเป็น Local Map Editor '
+                  'ยังไม่มีระบบสื่อสาร ECU จริง '
+                  'ข้อมูลในกราฟเป็นข้อมูลจาก Map ภายในแอปเท่านั้น',
                   style: TextStyle(
                     color: orange,
-                    fontSize: 11,
+                    fontSize: 10,
                     height: 1.6,
                   ),
                 ),
@@ -1805,6 +2272,42 @@ class _StudioHomeState extends State<StudioHome> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _settingsCard({
+    required String title,
+    required IconData icon,
+    required Widget child,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: panel,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: panel2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: cyan, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                title,
+                style: const TextStyle(
+                  color: cyan,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          child,
+        ],
+      ),
     );
   }
 
@@ -1823,27 +2326,28 @@ class _StudioHomeState extends State<StudioHome> {
         Expanded(
           child: Center(
             child: Container(
-              padding: const EdgeInsets.all(30),
-              margin: const EdgeInsets.all(20),
+              padding: const EdgeInsets.all(25),
+              margin: const EdgeInsets.all(15),
               decoration: BoxDecoration(
                 color: panel,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: panel2),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(icon, size: 50, color: blue),
-                  const SizedBox(height: 15),
+                  Icon(icon, size: 45, color: blue),
+                  const SizedBox(height: 12),
                   Text(
                     description,
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: muted,
                       height: 1.7,
+                      fontSize: 11,
                     ),
                   ),
-                  const SizedBox(height: 15),
+                  const SizedBox(height: 12),
                   const Text(
                     'NOT IMPLEMENTED',
                     style: TextStyle(
@@ -1863,7 +2367,10 @@ class _StudioHomeState extends State<StudioHome> {
   Widget _fileManager() {
     return Column(
       children: [
-        _header('FILE MANAGER', 'LOCAL MAP STORAGE'),
+        _header(
+          'FILE MANAGER',
+          'LOCAL MAP STORAGE',
+        ),
         Expanded(
           child: Center(
             child: Column(
@@ -1871,27 +2378,30 @@ class _StudioHomeState extends State<StudioHome> {
               children: [
                 const Icon(
                   Icons.folder_open,
-                  size: 48,
+                  size: 45,
                   color: blue,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 const Text('จัดเก็บแผนที่ไว้ในเครื่อง'),
-                const SizedBox(height: 15),
+                const SizedBox(height: 12),
                 FilledButton.icon(
                   onPressed: _saveMaps,
                   icon: const Icon(Icons.save),
                   label: const Text('SAVE ALL MAPS'),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 7),
                 OutlinedButton.icon(
                   onPressed: _loadMaps,
                   icon: const Icon(Icons.refresh),
                   label: const Text('LOAD SAVED MAPS'),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 const Text(
                   'JSON / CSV Import-Export ยังไม่เปิดใช้งาน',
-                  style: TextStyle(color: muted, fontSize: 10),
+                  style: TextStyle(
+                    color: muted,
+                    fontSize: 9,
+                  ),
                 ),
               ],
             ),
@@ -1904,15 +2414,18 @@ class _StudioHomeState extends State<StudioHome> {
   Widget _ecuPage() {
     return Column(
       children: [
-        _header('ECU CONNECTION', 'HARDWARE INTERFACE'),
+        _header(
+          'ECU CONNECTION',
+          'HARDWARE INTERFACE',
+        ),
         Expanded(
           child: Center(
             child: Container(
-              margin: const EdgeInsets.all(20),
-              padding: const EdgeInsets.all(25),
+              margin: const EdgeInsets.all(15),
+              padding: const EdgeInsets.all(22),
               decoration: BoxDecoration(
                 color: panel,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: panel2),
               ),
               child: const Column(
@@ -1921,9 +2434,9 @@ class _StudioHomeState extends State<StudioHome> {
                   Icon(
                     Icons.bluetooth_disabled,
                     color: orange,
-                    size: 50,
+                    size: 45,
                   ),
-                  SizedBox(height: 15),
+                  SizedBox(height: 12),
                   Text(
                     'NOT CONNECTED',
                     style: TextStyle(
@@ -1941,7 +2454,7 @@ class _StudioHomeState extends State<StudioHome> {
                     style: TextStyle(
                       color: muted,
                       height: 1.6,
-                      fontSize: 11,
+                      fontSize: 10,
                     ),
                   ),
                 ],
@@ -1951,6 +2464,67 @@ class _StudioHomeState extends State<StudioHome> {
         ),
       ],
     );
+  }
+}
+
+// ============================================================
+// DASHBOARD DECORATIVE GRAPH
+// ============================================================
+
+class DashboardGraphPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+
+    final grid = Paint()
+      ..color = panel2
+      ..strokeWidth = 0.6;
+
+    for (int i = 0; i <= 3; i++) {
+      final y = size.height * i / 3;
+
+      canvas.drawLine(
+        Offset(0, y),
+        Offset(size.width, y),
+        grid,
+      );
+    }
+
+    final path = Path();
+
+    final points = <Offset>[
+      Offset(0, size.height * 0.88),
+      Offset(size.width * 0.12, size.height * 0.72),
+      Offset(size.width * 0.28, size.height * 0.48),
+      Offset(size.width * 0.47, size.height * 0.20),
+      Offset(size.width * 0.66, size.height * 0.10),
+      Offset(size.width * 0.82, size.height * 0.15),
+      Offset(size.width, size.height * 0.22),
+    ];
+
+    path.moveTo(points.first.dx, points.first.dy);
+
+    for (int i = 1; i < points.length; i++) {
+      path.lineTo(points[i].dx, points[i].dy);
+    }
+
+    final line = Paint()
+      ..color = blue
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawPath(path, line);
+
+    final dot = Paint()..color = cyan;
+
+    for (final point in points) {
+      canvas.drawCircle(point, 2.5, dot);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant DashboardGraphPainter oldDelegate) {
+    return false;
   }
 }
 
@@ -1976,7 +2550,11 @@ class MapGraphPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (size.width <= 0 || size.height <= 0) return;
+    if (size.width <= 0 ||
+        size.height <= 0 ||
+        data.isEmpty) {
+      return;
+    }
 
     if (mode == GraphMode.twoD) {
       _paint2D(canvas, size);
@@ -1985,13 +2563,14 @@ class MapGraphPainter extends CustomPainter {
     }
   }
 
-  void _paintGrid(Canvas canvas, Size size, Rect area) {
+  void _paintGrid(Canvas canvas, Rect area) {
     final paint = Paint()
       ..color = panel2
       ..strokeWidth = 1;
 
     for (int i = 0; i <= 5; i++) {
       final y = area.top + area.height * i / 5;
+
       canvas.drawLine(
         Offset(area.left, y),
         Offset(area.right, y),
@@ -2001,6 +2580,7 @@ class MapGraphPainter extends CustomPainter {
 
     for (int i = 0; i <= 5; i++) {
       final x = area.left + area.width * i / 5;
+
       canvas.drawLine(
         Offset(x, area.top),
         Offset(x, area.bottom),
@@ -2011,46 +2591,45 @@ class MapGraphPainter extends CustomPainter {
 
   void _paint2D(Canvas canvas, Size size) {
     final area = Rect.fromLTWH(
-      48,
-      18,
-      math.max(1, size.width - 65),
-      math.max(1, size.height - 55),
+      42,
+      15,
+      math.max(1.0, size.width - 58),
+      math.max(1.0, size.height - 45),
     );
 
-    _paintGrid(canvas, size, area);
+    _paintGrid(canvas, area);
 
-    final line = Paint()
-      ..color = cyan
-      ..strokeWidth = 2.2
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+    final averages = <double>[];
 
-    final fill = Paint()
-      ..color = blue.withOpacity(0.12)
-      ..style = PaintingStyle.fill;
+    for (final row in data) {
+      double total = 0;
+
+      for (final value in row) {
+        total += value;
+      }
+
+      averages.add(total / row.length);
+    }
+
+    double minValue = averages.reduce(math.min);
+    double maxValue = averages.reduce(math.max);
+
+    if (maxValue - minValue < 0.001) {
+      minValue -= 0.5;
+      maxValue += 0.5;
+    }
+
+    final range = maxValue - minValue;
 
     final path = Path();
     final fillPath = Path();
 
-    final minValue = data
-        .expand((row) => row)
-        .reduce(math.min);
-    final maxValue = data
-        .expand((row) => row)
-        .reduce(math.max);
+    for (int r = 0; r < averages.length; r++) {
+      final x = area.left +
+          area.width * r / math.max(1, averages.length - 1);
 
-    final range = math.max(0.001, maxValue - minValue);
-
-    for (int r = 0; r < data.length; r++) {
-      double total = 0;
-      for (int c = 0; c < data[r].length; c++) {
-        total += data[r][c];
-      }
-
-      final average = total / data[r].length;
-      final x = area.left + area.width * r / (data.length - 1);
       final y = area.bottom -
-          ((average - minValue) / range) * area.height;
+          ((averages[r] - minValue) / range) * area.height;
 
       if (r == 0) {
         path.moveTo(x, y);
@@ -2065,49 +2644,78 @@ class MapGraphPainter extends CustomPainter {
     fillPath.lineTo(area.right, area.bottom);
     fillPath.close();
 
+    final fill = Paint()
+      ..color = blue.withOpacity(0.12)
+      ..style = PaintingStyle.fill;
+
+    final line = Paint()
+      ..color = cyan
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
     canvas.drawPath(fillPath, fill);
     canvas.drawPath(path, line);
 
     final dotPaint = Paint()..color = cyan;
-    for (int r = 0; r < data.length; r += 4) {
-      final average =
-          data[r].reduce((a, b) => a + b) / data[r].length;
-      final x = area.left + area.width * r / (data.length - 1);
+
+    for (int r = 0; r < averages.length; r += 5) {
+      final x = area.left +
+          area.width * r / math.max(1, averages.length - 1);
+
       final y = area.bottom -
-          ((average - minValue) / range) * area.height;
-      canvas.drawCircle(Offset(x, y), 3, dotPaint);
+          ((averages[r] - minValue) / range) * area.height;
+
+      canvas.drawCircle(
+        Offset(x, y),
+        2.5,
+        dotPaint,
+      );
     }
 
     _drawText(
       canvas,
-      'RPM',
-      Offset(area.center.dx, size.height - 14),
+      'RPM 1,500 - 15,000',
+      Offset(area.center.dx - 55, size.height - 14),
     );
+
     _drawText(
       canvas,
       'VALUE',
-      Offset(8, area.top + 5),
+      const Offset(3, 4),
     );
   }
 
   void _paint3D(Canvas canvas, Size size) {
+    final rows = data.length;
+    final cols = data.first.length;
+
+    if (rows < 2 || cols < 2) return;
+
     final centerX = size.width / 2;
     final baseY = size.height * 0.78;
-    final scaleX = size.width * 0.78 / 50;
-    final scaleY = size.height * 0.55 / 34;
+
+    final scaleX = size.width * 0.78 / (cols - 1);
+    final scaleY = size.height * 0.55 / (rows - 1);
+
     final heightScale = size.height * 0.48;
 
-    final minValue = data
-        .expand((row) => row)
-        .reduce(math.min);
-    final maxValue = data
-        .expand((row) => row)
-        .reduce(math.max);
+    double minValue = data.first.first;
+    double maxValue = data.first.first;
+
+    for (final row in data) {
+      for (final value in row) {
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
+      }
+    }
+
     final range = math.max(0.001, maxValue - minValue);
 
     Offset project(int r, int c, double value) {
-      final x = (c - 25) * scaleX;
-      final z = (r - 17) * scaleY;
+      final x = (c - (cols - 1) / 2) * scaleX;
+      final z = (r - (rows - 1) / 2) * scaleY;
+
       final h = ((value - minValue) / range) * heightScale;
 
       final cosR = math.cos(rotation);
@@ -2129,41 +2737,44 @@ class MapGraphPainter extends CustomPainter {
 
     final surfacePaint = Paint()
       ..color = cyan.withOpacity(0.85)
-      ..strokeWidth = 1.2
+      ..strokeWidth = 1
       ..style = PaintingStyle.stroke;
 
-    // Draw longitudinal surface lines.
-    for (int r = 0; r < 35; r += 2) {
+    for (int r = 0; r < rows; r += 2) {
       final path = Path();
-      for (int c = 0; c < 51; c += 2) {
+
+      for (int c = 0; c < cols; c += 2) {
         final point = project(r, c, data[r][c]);
+
         if (c == 0) {
           path.moveTo(point.dx, point.dy);
         } else {
           path.lineTo(point.dx, point.dy);
         }
       }
+
       canvas.drawPath(path, surfacePaint);
     }
 
-    // Draw cross surface lines.
-    for (int c = 0; c < 51; c += 3) {
+    for (int c = 0; c < cols; c += 3) {
       final path = Path();
-      for (int r = 0; r < 35; r += 2) {
+
+      for (int r = 0; r < rows; r += 2) {
         final point = project(r, c, data[r][c]);
+
         if (r == 0) {
           path.moveTo(point.dx, point.dy);
         } else {
           path.lineTo(point.dx, point.dy);
         }
       }
+
       canvas.drawPath(path, gridPaint);
     }
 
-    // Base axes.
     final axisPaint = Paint()
       ..color = muted
-      ..strokeWidth = 1.2;
+      ..strokeWidth = 1;
 
     canvas.drawLine(
       Offset(centerX - size.width * 0.38, baseY),
@@ -2174,22 +2785,27 @@ class MapGraphPainter extends CustomPainter {
     _drawText(
       canvas,
       'TPS',
-      Offset(size.width - 30, baseY + 12),
+      Offset(size.width - 28, baseY + 10),
     );
+
     _drawText(
       canvas,
       'RPM',
-      Offset(22, baseY + 10),
+      Offset(5, baseY + 8),
     );
   }
 
-  void _drawText(Canvas canvas, String text, Offset position) {
+  void _drawText(
+    Canvas canvas,
+    String text,
+    Offset position,
+  ) {
     final painter = TextPainter(
       text: TextSpan(
         text: text,
         style: const TextStyle(
           color: muted,
-          fontSize: 10,
+          fontSize: 9,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -2200,10 +2816,7 @@ class MapGraphPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant MapGraphPainter oldDelegate) {
-    return oldDelegate.data != data ||
-        oldDelegate.mode != mode ||
-        oldDelegate.rotation != rotation ||
-        oldDelegate.minimum != minimum ||
-        oldDelegate.maximum != maximum;
+    // Always repaint because map cells are edited in place.
+    return true;
   }
 }
